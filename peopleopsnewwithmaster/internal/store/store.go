@@ -44,7 +44,7 @@ func Open() (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, migration := range []string{"migrations/001_init.sql", "migrations/002_app_master_documents.sql", "migrations/003_employee_profiles.sql", "migrations/004_roles_hours_payroll.sql", "migrations/005_employee_hierarchy_password.sql", "migrations/006_role_permissions.sql"} {
+	for _, migration := range []string{"migrations/001_init.sql", "migrations/002_app_master_documents.sql", "migrations/003_employee_profiles.sql", "migrations/004_roles_hours_payroll.sql", "migrations/005_employee_hierarchy_password.sql", "migrations/006_role_permissions.sql", "migrations/007_actual_hours_approval.sql"} {
 		b, readErr := migrationFiles.ReadFile(migration)
 		if readErr != nil {
 			db.Close()

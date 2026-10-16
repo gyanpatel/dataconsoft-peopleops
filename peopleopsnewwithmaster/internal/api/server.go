@@ -86,6 +86,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/role-pages", s.protected(http.HandlerFunc(s.rolePages)))
 	mux.Handle("PUT /api/v1/role-pages", s.protected(http.HandlerFunc(s.rolePages)))
 	mux.Handle("GET /api/v1/actual-hours", s.protected(http.HandlerFunc(s.actualHours)))
+	mux.Handle("POST /api/v1/actual-hours/approve", s.protected(http.HandlerFunc(s.approveActualHours)))
 	mux.Handle("GET /api/v1/employees/{id}/bank-details", s.protected(http.HandlerFunc(s.employeeBank)))
 	mux.Handle("PUT /api/v1/employees/{id}/bank-details", s.protected(http.HandlerFunc(s.employeeBank)))
 	mux.Handle("GET /api/v1/employees/{id}/salary-breakup", s.protected(http.HandlerFunc(s.salaryBreakup)))

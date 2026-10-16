@@ -370,7 +370,7 @@ func (s *Server) actualHours(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	month := r.URL.Query().Get("month")
-	query := `SELECT h.employee_id,e.first_name||' '||e.last_name,h.work_date,h.check_in_at,h.check_out_at,h.assigned_shift_minutes,h.actual_minutes,h.normal_minutes,h.overtime_minutes,h.payment_pending FROM dcs_employees_actual_hours h JOIN employees e ON e.id=h.employee_id WHERE ($1='' OR to_char(h.work_date,'YYYY-MM')=$1) ORDER BY h.work_date DESC,e.last_name LIMIT 1000`
+	query := `SELECT h.employee_id,e.first_name||' '||e.last_name,h.work_date,h.check_in_at,h.check_out_at,h.assigned_shift_minutes,h.actual_minutes,h.normal_minutes,h.overtime_minutes,h.payment_pending,h.approved,COALESCE(h.approved_by,''),h.approved_at,h.approval_note FROM dcs_employees_actual_hours h JOIN employees e ON e.id=h.employee_id WHERE ($1='' OR to_char(h.work_date,'YYYY-MM')=$1) ORDER BY h.work_date DESC,e.last_name LIMIT 1000`
 	rows, err := s.Store.DB.Query(r.Context(), query, month)
 	if err != nil {
 		log.Println("actual hours: list query failed:", err)
@@ -384,15 +384,53 @@ func (s *Server) actualHours(w http.ResponseWriter, r *http.Request) {
 		var day time.Time
 		var cin, cout sql.NullTime
 		var assigned, actual, normal, ot int
-		var pending bool
-		if err := rows.Scan(&emp, &name, &day, &cin, &cout, &assigned, &actual, &normal, &ot, &pending); err != nil {
+		var pending, approved bool
+		var approvedBy, approvalNote sql.NullString
+		var approvedAt sql.NullTime
+		if err := rows.Scan(&emp, &name, &day, &cin, &cout, &assigned, &actual, &normal, &ot, &pending, &approved, &approvedBy, &approvedAt, &approvalNote); err != nil {
 			log.Println("actual hours: scan failed:", err)
 			writeError(w, 500, "database_error", "Could not read actual hours")
 			return
 		}
-		items = append(items, map[string]any{"employeeId": emp, "employeeName": name, "workDate": day.Format("2006-01-02"), "checkInAt": nullableTime(cin), "checkOutAt": nullableTime(cout), "assignedHours": float64(assigned) / 60, "actualHours": float64(actual) / 60, "normalHours": float64(normal) / 60, "overtimeHours": float64(ot) / 60, "paymentPending": pending})
+		items = append(items, map[string]any{"employeeId": emp, "employeeName": name, "workDate": day.Format("2006-01-02"), "checkInAt": nullableTime(cin), "checkOutAt": nullableTime(cout), "assignedHours": float64(assigned) / 60, "actualHours": float64(actual) / 60, "normalHours": float64(normal) / 60, "overtimeHours": float64(ot) / 60, "paymentPending": pending, "approved": approved, "approvedBy": approvedBy.String, "approvedAt": nullableTime(approvedAt), "approvalNote": approvalNote.String, "canApprove": s.hasPermission(r.Context(), u.Role, "attendance.approve")})
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
+}
+
+// approveActualHours records an auditable approval. It refuses rows without an assigned shift,
+// because normal/overtime hours cannot be validated against a zero-hour shift.
+func (s *Server) approveActualHours(w http.ResponseWriter, r *http.Request) {
+	u := current(r)
+	if !s.hasPermission(r.Context(), u.Role, "attendance.approve") {
+		writeError(w, 403, "forbidden", "Attendance approval permission required")
+		return
+	}
+	var in struct {
+		EmployeeID string `json:"employeeId"`
+		WorkDate   string `json:"workDate"`
+		Note       string `json:"note"`
+	}
+	if err := decode(r, &in); err != nil || strings.TrimSpace(in.EmployeeID) == "" || len(in.Note) > 500 {
+		writeError(w, 400, "validation_error", "Employee, work date and a note of at most 500 characters are required")
+		return
+	}
+	day, err := time.Parse("2006-01-02", in.WorkDate)
+	if err != nil {
+		writeError(w, 400, "validation_error", "Work date must use YYYY-MM-DD")
+		return
+	}
+	tag, err := s.Store.DB.Exec(r.Context(), `UPDATE dcs_employees_actual_hours SET approved=true,approved_by=$3,approved_at=now(),approval_note=$4,updated_at=now() WHERE employee_id=$1 AND work_date=$2 AND assigned_shift_minutes>0 AND check_in_at IS NOT NULL AND check_out_at IS NOT NULL`, in.EmployeeID, day, u.ID, strings.TrimSpace(in.Note))
+	if err != nil {
+		log.Println("actual hours: approval update failed:", err)
+		writeError(w, 500, "database_error", "Could not approve actual hours")
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		writeError(w, 409, "approval_not_ready", "Cannot approve: completed attendance and an assigned shift with positive duration are required")
+		return
+	}
+	s.Store.Audit(r.Context(), u.ID, "attendance.hours_approved", "actual_hours", in.EmployeeID+":"+day.Format("2006-01-02"), "Approved actual hours and overtime", requestID(r))
+	writeJSON(w, 200, map[string]any{"message": "Actual hours and overtime approved"})
 }
 
 func nullableTime(n sql.NullTime) any {
@@ -531,7 +569,7 @@ func (s *Server) calculatePayroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	rows, err := tx.Query(r.Context(), `SELECT h.employee_id,COALESCE(SUM(h.normal_minutes),0),COALESCE(SUM(h.overtime_minutes),0),COALESCE(b.hourly_rate_minor,0),COALESCE(b.overtime_multiplier,1.5),COALESCE(b.variable_pay_minor,0),COALESCE(b.allowances_minor,0),COALESCE(b.deductions_minor,0),COALESCE(b.currency,'GBP') FROM dcs_employees_actual_hours h LEFT JOIN dsc_employee_salary_breakup b ON b.employee_id=h.employee_id WHERE h.work_date BETWEEN $1 AND $2 AND h.payment_pending=true GROUP BY h.employee_id,b.hourly_rate_minor,b.overtime_multiplier,b.variable_pay_minor,b.allowances_minor,b.deductions_minor,b.currency`, start, end)
+	rows, err := tx.Query(r.Context(), `SELECT h.employee_id,COALESCE(SUM(h.normal_minutes),0),COALESCE(SUM(h.overtime_minutes),0),COALESCE(b.hourly_rate_minor,0),COALESCE(b.overtime_multiplier,1.5),COALESCE(b.variable_pay_minor,0),COALESCE(b.allowances_minor,0),COALESCE(b.deductions_minor,0),COALESCE(b.currency,'GBP') FROM dcs_employees_actual_hours h LEFT JOIN dsc_employee_salary_breakup b ON b.employee_id=h.employee_id WHERE h.work_date BETWEEN $1 AND $2 AND h.payment_pending=true AND h.approved=true GROUP BY h.employee_id,b.hourly_rate_minor,b.overtime_multiplier,b.variable_pay_minor,b.allowances_minor,b.deductions_minor,b.currency`, start, end)
 	if err != nil {
 		log.Println("payroll calculation: hours query failed:", err)
 		writeError(w, 500, "database_error", "Could not calculate payroll")
