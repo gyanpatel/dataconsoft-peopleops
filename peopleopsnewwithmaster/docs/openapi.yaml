@@ -1,0 +1,206 @@
+openapi: 3.0.3
+info:
+  title: PeopleOps HR API
+  version: 1.0.0
+  description: Versioned REST API for the PeopleOps starter application. Cookie sessions are issued by POST /api/v1/auth/login.
+servers:
+  - url: http://localhost:8080/api/v1
+paths:
+  /health:
+    get:
+      summary: Check API and database health
+      responses:
+        '200': {description: Healthy}
+        '503': {description: Database unavailable}
+  /auth/login:
+    post:
+      summary: Sign in and create a session cookie
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: {type: string, format: email}
+                password: {type: string, format: password}
+      responses:
+        '200': {description: Signed in}
+        '400': {description: Invalid request}
+        '401': {description: Invalid credentials}
+  /auth/logout:
+    post:
+      summary: Clear the session cookie
+      responses:
+        '200': {description: Signed out}
+  /auth/me:
+    get:
+      security: [{sessionCookie: []}]
+      summary: Return the current user
+      responses:
+        '200': {description: Current user}
+        '401': {description: Unauthorized}
+  /dashboard:
+    get:
+      security: [{sessionCookie: []}]
+      summary: Get dashboard metrics
+      responses:
+        '200': {description: Dashboard metrics}
+  /employees:
+    get:
+      security: [{sessionCookie: []}]
+      summary: Search employees
+      parameters:
+        - in: query
+          name: q
+          schema: {type: string}
+        - in: query
+          name: limit
+          schema: {type: integer, minimum: 1, maximum: 200}
+      responses:
+        '200': {description: Employee results}
+        '401': {description: Unauthorized}
+    post:
+      security: [{sessionCookie: []}]
+      summary: Create an employee (Super Admin / HR Admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [firstName, lastName, email, department, jobTitle, startDate]
+              properties:
+                employeeNumber: {type: string}
+                firstName: {type: string, maxLength: 80}
+                lastName: {type: string, maxLength: 80}
+                email: {type: string, format: email}
+                department: {type: string}
+                jobTitle: {type: string}
+                location: {type: string}
+                employmentType: {type: string}
+                startDate: {type: string, format: date}
+                salaryMinor: {type: integer, minimum: 0, description: Currency minor units, GBP}
+      responses:
+        '201': {description: Employee created}
+        '400': {description: Validation error}
+        '403': {description: Forbidden}
+  /attendance:
+    get:
+      security: [{sessionCookie: []}]
+      summary: List recent attendance events
+      responses:
+        '200': {description: Attendance events}
+  /attendance/check-in:
+    post:
+      security: [{sessionCookie: []}]
+      summary: Record check-in for linked employee
+      responses:
+        '201': {description: Event recorded}
+        '409': {description: Invalid attendance sequence}
+  /attendance/check-out:
+    post:
+      security: [{sessionCookie: []}]
+      summary: Record check-out for linked employee
+      responses:
+        '201': {description: Event recorded}
+        '409': {description: Invalid attendance sequence}
+  /leave-requests:
+    get:
+      security: [{sessionCookie: []}]
+      summary: List leave requests visible to the current role
+      responses:
+        '200': {description: Leave request list}
+    post:
+      security: [{sessionCookie: []}]
+      summary: Submit leave request
+      responses:
+        '201': {description: Request submitted}
+        '400': {description: Validation error}
+  /leave-requests/{id}/decision:
+    post:
+      security: [{sessionCookie: []}]
+      summary: Approve or reject a pending leave request
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision: {type: string, enum: [Approved, Rejected]}
+                note: {type: string, maxLength: 1000}
+      responses:
+        '200': {description: Decision recorded}
+        '403': {description: Forbidden or self-approval}
+        '409': {description: Request already decided}
+  /payroll:
+    get:
+      security: [{sessionCookie: []}]
+      summary: List demo payroll period summaries
+      responses:
+        '200': {description: Payroll periods}
+        '403': {description: Forbidden}
+  /audit:
+    get:
+      security: [{sessionCookie: []}]
+      summary: List recent audit events
+      responses:
+        '200': {description: Audit events}
+        '403': {description: Forbidden}
+  /reports/headcount.csv:
+    get:
+      security: [{sessionCookie: []}]
+      summary: Export employee headcount CSV
+      responses:
+        '200': {description: CSV file}
+        '403': {description: Forbidden}
+  /shifts:
+    get:
+      summary: List shift templates
+      security: [{sessionCookie: []}]
+      responses:
+        '200': {description: Shift templates}
+    post:
+      summary: Create a shift template
+      security: [{sessionCookie: []}]
+      responses:
+        '201': {description: Shift template created}
+  /shift-assignments:
+    get:
+      summary: List employee shift assignments
+      security: [{sessionCookie: []}]
+      responses:
+        '200': {description: Shift assignments}
+    post:
+      summary: Assign a shift to an employee for a date
+      security: [{sessionCookie: []}]
+      responses:
+        '201': {description: Shift assigned}
+        '409': {description: Employee already has an assignment for that date}
+  /shift-assignments/{id}:
+    delete:
+      summary: Remove a shift assignment
+      security: [{sessionCookie: []}]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        '204': {description: Assignment removed}
+
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: peopleops_session
