@@ -1136,7 +1136,7 @@ func sendWelcomeCredentials(to, first, password string) error {
 		port = "587"
 	}
 	addr := host + ":" + port
-	body := "To: " + to + "\r\nSubject: Your PeopleOps account\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nHello " + first + ",\r\n\r\nYour PeopleOps account has been created.\r\nUsername: " + to + "\r\nTemporary password: " + password + "\r\n\r\nYou must change this password after your first login.\r\n"
+	body := "To: " + to + "\r\nSubject: Your PeopleOps https://peopleops.dataconsoft.com/ account\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nHello " + first + ",\r\n\r\nYour PeopleOps account has been created.\r\nUsername: " + to + "\r\nTemporary password: " + password + "\r\n\r\nYou must change this password after your first login.\r\n"
 	var authSMTP smtp.Auth
 	if user != "" {
 		authSMTP = smtp.PlainAuth("", user, pass, host)
