@@ -118,6 +118,6 @@ Payroll is deliberately split into calculate, issue and clear steps so the appli
 ### Employee manager, hierarchy and onboarding
 - Employee creation supports an optional manager selected from existing employee records; the employee's `manager_id` stores the selected employee ID.
 - The Employee hierarchy page is available from the main navigation and reads reporting relationships from `/api/v1/employee-hierarchy`.
-- Creating an employee also creates a linked `Employee` role login with a cryptographically random temporary password. SMTP must be configured with `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, and optional `SMTP_USERNAME` / `SMTP_PASSWORD`. Account creation is rolled back if the welcome email cannot be sent.
+- Creating an employee also creates a linked login using the role selected in the employee form (validated against active roles in `dcs_app_roles`) with a cryptographically random temporary password. SMTP must be configured with `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, and optional `SMTP_USERNAME` / `SMTP_PASSWORD`. Account creation is rolled back if the welcome email cannot be sent.
 - Temporary-password accounts must change their password before using the rest of the application. New migration `005_employee_hierarchy_password.sql` adds this flag.
 - Employees do not see workforce summary metrics or Add employee actions; employee creation is also denied server-side for the Employee role.

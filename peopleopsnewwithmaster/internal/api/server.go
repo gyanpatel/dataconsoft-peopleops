@@ -207,7 +207,9 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": msg}})
 }
 func decode(r *http.Request, v any) error {
-	d := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
+	// Employee forms may include a base64-encoded profile photo and configurable fields.
+	// Allow a bounded 15 MiB JSON request instead of rejecting normal photo uploads at 1 MiB.
+	d := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 15<<20))
 	d.DisallowUnknownFields()
 	return d.Decode(v)
 }
@@ -375,6 +377,7 @@ type Employee struct {
 	PhotoID      string         `json:"photoId,omitempty"`
 	ManagerID    string         `json:"managerId,omitempty"`
 	ManagerName  string         `json:"managerName,omitempty"`
+	RoleName     string         `json:"roleName,omitempty"`
 }
 
 func (s *Server) employees(w http.ResponseWriter, r *http.Request) {
@@ -384,7 +387,7 @@ func (s *Server) employees(w http.ResponseWriter, r *http.Request) {
 	if v, e := strconv.Atoi(r.URL.Query().Get("limit")); e == nil && v > 0 && v <= 200 {
 		limit = v
 	}
-	rows, e := s.Store.DB.Query(s.Store.Ctx, `SELECT id,employee_number,first_name,last_name,email,department,job_title,location,employment_type,status,start_date,salary_minor,currency,custom_fields,COALESCE(photo_document_id, ''),COALESCE(manager_id,''),COALESCE((SELECT first_name||' '||last_name FROM employees m WHERE m.id=employees.manager_id),'') FROM employees WHERE ($1='' OR first_name LIKE $2 OR last_name LIKE $3 OR email LIKE $4 OR employee_number LIKE $5 OR department LIKE $6) ORDER BY last_name,first_name LIMIT $7`, q, like, like, like, like, like, limit)
+	rows, e := s.Store.DB.Query(s.Store.Ctx, `SELECT id,employee_number,first_name,last_name,email,department,job_title,location,employment_type,status,start_date,salary_minor,currency,custom_fields,COALESCE(photo_document_id, ''),COALESCE(manager_id,''),COALESCE((SELECT first_name||' '||last_name FROM employees m WHERE m.id=employees.manager_id),''),COALESCE((SELECT u.role FROM users u WHERE u.employee_id=employees.id AND u.active=true ORDER BY u.id LIMIT 1),'') FROM employees WHERE ($1='' OR first_name LIKE $2 OR last_name LIKE $3 OR email LIKE $4 OR employee_number LIKE $5 OR department LIKE $6) ORDER BY last_name,first_name LIMIT $7`, q, like, like, like, like, like, limit)
 	if e != nil {
 		writeError(w, 500, "database_error", "Could not load employees")
 		return
@@ -395,7 +398,7 @@ func (s *Server) employees(w http.ResponseWriter, r *http.Request) {
 		var x Employee
 		var sDate sql.NullTime
 		var customJSON []byte
-		if e = rows.Scan(&x.ID, &x.Number, &x.First, &x.Last, &x.Email, &x.Department, &x.Title, &x.Location, &x.Type, &x.Status, &sDate, &x.SalaryMinor, &x.Currency, &customJSON, &x.PhotoID, &x.ManagerID, &x.ManagerName); e != nil {
+		if e = rows.Scan(&x.ID, &x.Number, &x.First, &x.Last, &x.Email, &x.Department, &x.Title, &x.Location, &x.Type, &x.Status, &sDate, &x.SalaryMinor, &x.Currency, &customJSON, &x.PhotoID, &x.ManagerID, &x.ManagerName, &x.RoleName); e != nil {
 			log.Println("[ERROR]", e)
 			writeError(w, 500, "database_error", "Could not read employees")
 			return
@@ -436,11 +439,28 @@ func (s *Server) updateEmployee(w http.ResponseWriter, r *http.Request) {
 		PhotoData    string         `json:"photoData"`
 		PhotoName    string         `json:"photoName"`
 		ManagerID    string         `json:"managerId"`
+		RoleName     string         `json:"roleName"`
 	}
 	if decode(r, &in) != nil || strings.TrimSpace(in.First) == "" || strings.TrimSpace(in.Last) == "" || !strings.Contains(in.Email, "@") || in.Department == "" || in.Title == "" || in.SalaryMinor < 0 {
 		writeError(w, 400, "validation_error", "Complete the required fields with valid values")
 		return
 	}
+	in.RoleName = strings.TrimSpace(in.RoleName)
+	if in.RoleName == "" {
+		writeError(w, 400, "validation_error", "Select a login role for this employee account")
+		return
+	}
+	var activeRole string
+	if err := s.Store.DB.QueryRow(r.Context(), `SELECT COALESCE((SELECT role_name FROM dcs_app_roles WHERE lower(role_name)=lower($1) AND active=true), '')`, in.RoleName).Scan(&activeRole); err != nil {
+		log.Println("employee update: role validation query failed:", err)
+		writeError(w, 500, "database_error", "Could not validate selected login role")
+		return
+	}
+	if activeRole == "" {
+		writeError(w, 400, "invalid_role", "The selected login role does not exist or is inactive")
+		return
+	}
+	in.RoleName = activeRole
 	start, err := time.Parse("2006-01-02", in.StartDate)
 	if err != nil {
 		writeError(w, 400, "validation_error", "Start date must use YYYY-MM-DD")
@@ -465,6 +485,15 @@ func (s *Server) updateEmployee(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "update_failed", "Could not update employee; check the employee exists and the email/number is unique")
 		return
 	}
+	userTag, roleErr := tx.Exec(r.Context(), `UPDATE users SET role=$2,email=$3,display_name=$4 WHERE employee_id=$1 AND active=true`, id, in.RoleName, strings.ToLower(strings.TrimSpace(in.Email)), strings.TrimSpace(in.First)+" "+strings.TrimSpace(in.Last))
+	if roleErr != nil {
+		log.Println("employee update: linked login role update failed:", roleErr)
+		writeError(w, 500, "database_error", "Could not update the employee login role")
+		return
+	}
+	// Existing employee records may predate linked login accounts. Do not block
+	// editing their employee details when no active linked user exists.
+	_ = userTag
 	if in.PhotoData != "" {
 		parts := strings.SplitN(in.PhotoData, ",", 2)
 		if len(parts) != 2 {
@@ -543,6 +572,7 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 		PhotoData    string         `json:"photoData"`
 		PhotoName    string         `json:"photoName"`
 		ManagerID    string         `json:"managerId"`
+		RoleName     string         `json:"roleName"`
 	}
 	if err := decode(r, &in); err != nil {
 		log.Println("employee create: request JSON decode failed:", err)
@@ -554,6 +584,23 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "validation_error", "Complete the required fields with valid values: first name, last name, email, department, job title and a non-negative salary")
 		return
 	}
+	// Validate the requested login role against the active database role catalogue.
+	in.RoleName = strings.TrimSpace(in.RoleName)
+	if in.RoleName == "" {
+		writeError(w, 400, "validation_error", "Select a login role for the new employee account")
+		return
+	}
+	var activeRole string
+	if err := s.Store.DB.QueryRow(r.Context(), `SELECT COALESCE((SELECT role_name FROM dcs_app_roles WHERE lower(role_name)=lower($1) AND active=true), '')`, in.RoleName).Scan(&activeRole); err != nil {
+		log.Println("employee create: role validation query failed:", err)
+		writeError(w, 500, "database_error", "Could not validate selected login role")
+		return
+	}
+	if activeRole == "" {
+		writeError(w, 400, "invalid_role", "The selected login role does not exist or is inactive")
+		return
+	}
+	in.RoleName = activeRole
 	if in.Number == "" {
 		in.Number = "EMP-" + strings.ToUpper(auth.NewID()[:8])
 	}
@@ -637,7 +684,7 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := "user-" + id
-	_, userErr := s.Store.DB.Exec(r.Context(), `INSERT INTO users(id,email,password_hash,display_name,role,employee_id,active,must_change_password) VALUES($1,$2,$3,$4,'Employee',$5,TRUE,TRUE)`, userID, strings.ToLower(strings.TrimSpace(in.Email)), passwordHash, strings.TrimSpace(in.First)+" "+strings.TrimSpace(in.Last), id)
+	_, userErr := s.Store.DB.Exec(r.Context(), `INSERT INTO users(id,email,password_hash,display_name,role,employee_id,active,must_change_password) VALUES($1,$2,$3,$4,$5,$6,TRUE,TRUE)`, userID, strings.ToLower(strings.TrimSpace(in.Email)), passwordHash, strings.TrimSpace(in.First)+" "+strings.TrimSpace(in.Last), in.RoleName, id)
 	if userErr != nil {
 		log.Println("employee create: linked user insert failed:", userErr)
 		_, _ = s.Store.DB.Exec(r.Context(), `DELETE FROM employees WHERE id=$1`, id)
