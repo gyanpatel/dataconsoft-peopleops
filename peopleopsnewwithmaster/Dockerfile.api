@@ -10,6 +10,9 @@ WORKDIR /app
 COPY --from=build /out/peopleops /app/peopleops
 COPY scripts/healthcheck.sh /app/peopleops-healthcheck
 RUN chmod +x /app/peopleops-healthcheck && mkdir -p /data && chown -R peopleops:peopleops /data
+RUN export BANK_DETAILS_KEY=test123
+RUN export DATABASE_URL="postgres://peopleops:peopleops@localhost:5432/peopleops?sslmode=disable"
+
 USER peopleops
 EXPOSE 8080
 ENTRYPOINT ["/app/peopleops"]
