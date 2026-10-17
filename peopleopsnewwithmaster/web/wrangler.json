@@ -1,10 +1,9 @@
 {
 "name": "dataconsoft-peopleops",
-    "main": "peopleopsnewwithmaster/web/src/worker.js",
-    "compatibility_date": "2026-10-17",
-    "assets": {
-      "directory": "./peopleopsnewwithmaster/web/dist",
-      "binding": "ASSETS"
-    }
-  }
-  
+"main": "src/worker.js",
+"compatibility_date": "2026-10-17",
+"assets": {
+  "directory": "./dist",
+  "binding": "ASSETS"
+}
+}
