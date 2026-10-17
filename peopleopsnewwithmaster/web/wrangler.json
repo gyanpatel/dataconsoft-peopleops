@@ -1,5 +1,5 @@
 {
-    "name": "peopleops-web",
+"name": "dataconsoft-peopleops",
     "main": "peopleopsnewwithmaster/web/src/worker.js",
     "compatibility_date": "2026-10-17",
     "assets": {
