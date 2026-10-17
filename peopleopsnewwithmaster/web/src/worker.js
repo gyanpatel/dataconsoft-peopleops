@@ -1,7 +1,7 @@
 export default {
     async fetch(request, env, ctx) {
       const url = new URL(request.url);
-  
+   
       // 1. API Proxy Pass (Replacing Nginx location /api/)
       if (url.pathname.startsWith('/api/')) {
         // Replace this with your public domain API endpoint or Cloudflare Tunnel address
