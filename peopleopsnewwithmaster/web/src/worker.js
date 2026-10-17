@@ -4,7 +4,7 @@ export default {
  
     // 1. API Proxy Pass (Replacing Nginx location /api/)
     if (url.pathname.startsWith('/api/')) {
-      const API_UPSTREAM = 'http://144.21.56.192:8080'; 
+      const API_UPSTREAM = 'http://api-backend.dataconsoft.com:8080'; 
       const newUrl = API_UPSTREAM + url.pathname + url.search;
       
       // Clone the incoming headers so we can safely modify them
