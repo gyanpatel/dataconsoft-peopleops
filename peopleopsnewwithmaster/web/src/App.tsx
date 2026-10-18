@@ -173,6 +173,7 @@ export default function App() {
     [actualHours, setActualHours] = useState<any[]>([]),
     [shiftForm, setShiftForm] = useState({
       name: "",
+      type: "NT",
       startTime: "09:00",
       endTime: "17:00",
       breakMinutes: 30,
@@ -302,7 +303,11 @@ export default function App() {
   }
   async function punch(type: "check-in" | "check-out") {
     try {
-      await request(`/attendance/${type}`, { method: "POST", body: "{}" });
+      const sendPunch = async (location?: GeolocationPosition) => request(`/attendance/${type}`, { method: "POST", body: JSON.stringify(location ? { latitude: location.coords.latitude, longitude: location.coords.longitude, accuracyM: location.coords.accuracy } : {}) });
+      if (typeof navigator !== "undefined" && navigator.geolocation) {
+        try { const position = await new Promise<GeolocationPosition>((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 7000, maximumAge: 30000 })); await sendPunch(position); }
+        catch { await sendPunch(); }
+      } else { await sendPunch(); }
       setToast(
         type === "check-in" ? "You are checked in" : "You are checked out"
       );
@@ -1145,6 +1150,7 @@ export default function App() {
                         setToast("Shift template created");
                         setShiftForm({
                           name: "",
+                          type: "NT",
                           startTime: "09:00",
                           endTime: "17:00",
                           breakMinutes: 30,
@@ -1174,6 +1180,11 @@ export default function App() {
                       />
                     </label>
                     <div className="form-grid">
+                      <label className="field-label">Shift type
+                        <select value={shiftForm.type} onChange={(e) => setShiftForm((f) => ({ ...f, type: e.target.value }))}>
+                          <option value="NT">Normal time (NT)</option><option value="OT">OverTime (OT)</option>
+                        </select>
+                      </label>
                       <label className="field-label">
                         Start time
                         <input
@@ -2761,6 +2772,9 @@ function SalaryBreakupSection({
     permissions.includes("payroll.manage");
   const [data, setData] = useState<any>({
     grossPayMinor: 0,
+    baseAnnualPayMinor: 0,
+    bonusPayMinor: 0,
+    bonusMonth: 12,
     hourlyRateMinor: 0,
     overtimeMultiplier: 1.5,
     variablePayMinor: 0,
@@ -2802,6 +2816,7 @@ function SalaryBreakupSection({
           setData({
             ...data,
             [key]: Math.round(Number(e.target.value || 0) * 100),
+            ...(key === "baseAnnualPayMinor" ? { grossPayMinor: Math.round(Number(e.target.value || 0) * 100), hourlyRateMinor: Math.round(Number(e.target.value || 0) * 100 / 2880) } : {}),
           })
         }
       />
@@ -2815,7 +2830,7 @@ function SalaryBreakupSection({
         rate drives normal and overtime calculations.
       </p>
       <div className="form-grid">
-        {field("Gross pay (annual)", "grossPayMinor")}
+        {field("Base annual pay", "baseAnnualPayMinor")}
         {field("Hourly rate", "hourlyRateMinor")}
         {field("Variable pay", "variablePayMinor")}
         {field("Allowances", "allowancesMinor")}
