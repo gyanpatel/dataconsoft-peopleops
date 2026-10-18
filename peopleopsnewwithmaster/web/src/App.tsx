@@ -4078,21 +4078,160 @@ function LeaveBalancePage({ user }: { user: User | null }) {
   const [annualDays, setAnnualDays] = useState("25");
   const [holidayDate, setHolidayDate] = useState("");
   const [holidayName, setHolidayName] = useState("");
-  const [weekendDays, setWeekendDays] = useState<number[]>([0,6]);
+  const [weekendDays, setWeekendDays] = useState<number[]>([0, 6]);
   const [message, setMessage] = useState("");
   const canConfigure = user?.role?.toLowerCase() === "master admin";
+
   const load = async () => {
-    const b = await request<any>(`/leave-balances?year=${year}`); setItems(b.items || []);
-    if (canConfigure) { const cfg = await request<any>("/leave-balances?settings=true"); setSettings(cfg); setWeekendDays(cfg.weekendDays || [0,6]); }
+    const balances = await request<any>(`/leave-balances?year=${year}`);
+    setItems(balances.items || []);
+    if (canConfigure) {
+      const config = await request<any>("/leave-balances?settings=true");
+      setSettings(config);
+      setWeekendDays(config.weekendDays || [0, 6]);
+    }
   };
-  useEffect(() => { load().catch(e => setMessage(e.message)); }, [year, user?.role]);
-  const save = async (payload: any) => { await request("/leave-balances", { method: "POST", body: JSON.stringify(payload) }); await load(); setMessage("Saved successfully"); };
-  return <>
-    <div className="page-heading"><div><div className="eyebrow green-eyebrow">ANNUAL ENTITLEMENT</div><h1>Leave Balance</h1><p>Annual leave entitlement is prorated from the employee's joining date. Approved annual leave excludes weekends and configured public holidays.</p></div><label>Calendar year <select value={year} onChange={e=>setYear(Number(e.target.value))}>{[year-1,year,year+1].map(y=><option key={y} value={y}>{y}</option>)}</select></label></div>
-    {message && <p role="status">{message}</p>}
-    <section className="panel directory-panel"><div className="panel-heading"><div><h3>Employee leave balances</h3><p>Total entitlement, approved leave taken, and remaining balance</p></div></div><div className="table-wrap"><table><thead><tr><th>Employee</th><th>Role</th><th>Join date</th><th>Total leaves</th><th>Leaves taken</th><th>Remaining</th></tr></thead><tbody>{items.map(x=><tr key={x.employeeId}><td><strong>{x.employeeName}</strong><div className="muted">{x.employeeNumber}</div></td><td>{x.role || "—"}</td><td>{x.joinDate}</td><td>{Number(x.totalLeaves).toFixed(2)}</td><td>{Number(x.leavesTaken).toFixed(2)}</td><td><strong>{Number(x.remainingLeaves).toFixed(2)}</strong></td></tr>)}</tbody></table>{!items.length&&<div className="empty-state">No leave balances found for this year.</div>}</div></section>
-    {canConfigure && <section className="panel directory-panel"><div className="panel-heading"><div><h3>Master Admin configuration</h3><p>Set annual leave by role, public holidays, and non-working weekdays.</p></div></div><form className="form-grid" onSubmit={e=>{e.preventDefault();save({role,annualDays:Number(annualDays)}).catch(err=>setMessage(err.message));}}><label>Role name<input value={role} onChange={e=>setRole(e.target.value)} required placeholder="e.g. HR Admin" /></label><label>Annual leave days<input type="number" min="0" max="366" step="0.5" value={annualDays} onChange={e=>setAnnualDays(e.target.value)} required /></label><button className="primary" type="submit">Save role entitlement</button></form><form className="form-grid" onSubmit={e=>{e.preventDefault();save({date:holidayDate,name:holidayName}).then(()=>{setHolidayDate("");setHolidayName("");}).catch(err=>setMessage(err.message));}}><label>Public holiday date<input type="date" value={holidayDate} onChange={e=>setHolidayDate(e.target.value)} required /></label><label>Holiday name<input value={holidayName} onChange={e=>setHolidayName(e.target.value)} required /></label><button className="primary" type="submit">Add / update holiday</button></form><div><strong>Non-working weekdays</strong><div className="form-grid">{["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"].map((d,i)=><label key={d}><input type="checkbox" checked={weekendDays.includes(i)} onChange={e=>setWeekendDays(old=>e.target.checked?[...old,i]:old.filter(x=>x!==i))} /> {d}</label>)}</div><button className="primary" onClick={()=>save({weekendDays}).catch(err=>setMessage(err.message))}>Save weekend days</button></div><div className="table-wrap"><table><thead><tr><th>Role</th><th>Annual days</th></tr></thead><tbody>{settings.roles.map((x:any)=><tr key={x.role}><td>{x.role}</td><td>{x.annualDays}</td></tr>)}</tbody></table></div><div className="table-wrap"><table><thead><tr><th>Holiday</th><th>Date</th><th></th></tr></thead><tbody>{settings.holidays.map((x:any)=><tr key={x.date}><td>{x.name}</td><td>{x.date}</td><td><button className="secondary" onClick={()=>save({deleteHoliday:x.date}).catch(err=>setMessage(err.message))}>Remove</button></td></tr>)}</tbody></table></div></section>}
-  </>;
+
+  useEffect(() => {
+    load().catch((error) => setMessage(error.message));
+  }, [year, user?.role]);
+
+  const save = async (payload: any) => {
+    await request("/leave-balances", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    await load();
+    setMessage("Changes saved successfully.");
+  };
+
+  const totalEntitlement = items.reduce((sum, item) => sum + Number(item.totalLeaves || 0), 0);
+  const totalTaken = items.reduce((sum, item) => sum + Number(item.leavesTaken || 0), 0);
+  const totalRemaining = items.reduce((sum, item) => sum + Number(item.remainingLeaves || 0), 0);
+  const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+  return (
+    <>
+      <div className="page-heading">
+        <div>
+          <div className="eyebrow green-eyebrow">TIME AWAY</div>
+          <h1>Leave Balance</h1>
+          <p>Review annual leave entitlement, leave taken, and remaining days.</p>
+        </div>
+        <label>
+          Calendar year
+          <select value={year} onChange={(event) => setYear(Number(event.target.value))}>
+            {[year - 1, year, year + 1].map((optionYear) => (
+              <option key={optionYear} value={optionYear}>{optionYear}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      {message && <div className="error-banner" role="status">{message}</div>}
+
+      <div className="metrics-grid">
+        <Metric icon={<Users />} label="Employees" value={items.length} note="Employees in this view" tone="blue" />
+        <Metric icon={<CalendarDays />} label="Total entitlement" value={totalEntitlement.toFixed(2)} note="Days for selected year" tone="green" />
+        <Metric icon={<Clock3 />} label="Leave taken" value={totalTaken.toFixed(2)} note="Approved working days" tone="orange" />
+        <Metric icon={<CheckCircle2 />} label="Remaining leave" value={totalRemaining.toFixed(2)} note="Days remaining" tone="blue" />
+      </div>
+
+      <section className="panel directory-panel">
+        <div className="panel-heading">
+          <div>
+            <h3>Employee leave balances</h3>
+            <p>Entitlement is prorated from the joining date. Weekends and configured public holidays are excluded from leave taken.</p>
+          </div>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Employee</th><th>Role</th><th>Join date</th><th>Total leaves</th><th>Leaves taken</th><th>Remaining</th></tr>
+            </thead>
+            <tbody>
+              {items.map((item) => (
+                <tr key={item.employeeId}>
+                  <td><strong>{item.employeeName}</strong><div className="muted">{item.employeeNumber}</div></td>
+                  <td>{item.role || <span className="muted-dash">—</span>}</td>
+                  <td>{item.joinDate}</td>
+                  <td>{Number(item.totalLeaves).toFixed(2)}</td>
+                  <td>{Number(item.leavesTaken).toFixed(2)}</td>
+                  <td><strong>{Number(item.remainingLeaves).toFixed(2)}</strong></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!items.length && <div className="empty-state">No leave balances found for this year.</div>}
+        </div>
+      </section>
+
+      {canConfigure && (
+        <section className="panel directory-panel">
+          <div className="panel-heading">
+            <div>
+              <h3>Leave policy settings</h3>
+              <p>Configure annual entitlement by role, public holidays, and non-working weekdays.</p>
+            </div>
+          </div>
+
+          <form className="form-grid" onSubmit={(event) => {
+            event.preventDefault();
+            save({ role, annualDays: Number(annualDays) }).catch((error) => setMessage(error.message));
+          }}>
+            <label>Role name<input value={role} onChange={(event) => setRole(event.target.value)} required placeholder="e.g. HR Admin" /></label>
+            <label>Annual leave days<input type="number" min="0" max="366" step="0.5" value={annualDays} onChange={(event) => setAnnualDays(event.target.value)} required /></label>
+            <button className="primary" type="submit">Save role entitlement</button>
+          </form>
+
+          <div className="panel-heading">
+            <div><h3>Public holidays</h3><p>Add the public holidays that should not count as leave days.</p></div>
+          </div>
+          <form className="form-grid" onSubmit={(event) => {
+            event.preventDefault();
+            save({ date: holidayDate, name: holidayName }).then(() => {
+              setHolidayDate("");
+              setHolidayName("");
+            }).catch((error) => setMessage(error.message));
+          }}>
+            <label>Holiday date<input type="date" value={holidayDate} onChange={(event) => setHolidayDate(event.target.value)} required /></label>
+            <label>Holiday name<input value={holidayName} onChange={(event) => setHolidayName(event.target.value)} required placeholder="e.g. Christmas Day" /></label>
+            <button className="primary" type="submit">Add / update holiday</button>
+          </form>
+
+          <div className="panel-heading">
+            <div><h3>Non-working weekdays</h3><p>Select weekdays that should be excluded when calculating leave taken.</p></div>
+          </div>
+          <div className="form-grid">
+            {dayNames.map((day, index) => (
+              <label className="check-label" key={day}>
+                <input type="checkbox" checked={weekendDays.includes(index)} onChange={(event) => setWeekendDays((current) => event.target.checked ? [...current, index] : current.filter((value) => value !== index))} />
+                {day}
+              </label>
+            ))}
+          </div>
+          <div className="form-actions"><button className="primary" onClick={() => save({ weekendDays }).catch((error) => setMessage(error.message))}>Save non-working days</button></div>
+
+          <div className="panel-heading"><div><h3>Role entitlements</h3><p>Configured annual leave allowance for each role.</p></div></div>
+          <div className="table-wrap">
+            <table><thead><tr><th>Role</th><th>Annual days</th></tr></thead><tbody>
+              {(settings.roles || []).map((item: any) => <tr key={item.role}><td>{item.role}</td><td>{item.annualDays}</td></tr>)}
+            </tbody></table>
+          </div>
+
+          <div className="panel-heading"><div><h3>Configured public holidays</h3><p>Remove holidays that should no longer be excluded.</p></div></div>
+          <div className="table-wrap">
+            <table><thead><tr><th>Holiday</th><th>Date</th><th>Action</th></tr></thead><tbody>
+              {(settings.holidays || []).map((item: any) => (
+                <tr key={item.date}><td>{item.name}</td><td>{item.date}</td><td><button className="secondary" onClick={() => save({ deleteHoliday: item.date }).catch((error) => setMessage(error.message))}>Remove</button></td></tr>
+              ))}
+            </tbody></table>
+            {!settings.holidays?.length && <div className="empty-state">No public holidays configured.</div>}
+          </div>
+        </section>
+      )}
+    </>
+  );
 }
 
 function pageIdForLabel(label: string): string {

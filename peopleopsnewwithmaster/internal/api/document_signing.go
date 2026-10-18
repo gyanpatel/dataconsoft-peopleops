@@ -109,7 +109,7 @@ func sendSigningRequest(to, first, token string) error {
 		origin = strings.TrimRight(strings.TrimSpace(os.Getenv("APP_ORIGIN")), "/")
 	}
 	if origin == "" {
-		origin = "https://peopleops.dataconsoft.com"
+		origin = "http://api-backend.dataconsoft.com:8080"
 	}
 	link := origin + "/api/v1/sign/" + token
 	body := "To: " + to + "\r\nSubject: Employment document ready for signature\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nHello " + first + ",\r\n\r\nAn employment document is ready for your review and electronic signature: " + link + "\r\n\r\nPlease review the document carefully. Contact HR if the terms are incomplete or incorrect.\r\n"
