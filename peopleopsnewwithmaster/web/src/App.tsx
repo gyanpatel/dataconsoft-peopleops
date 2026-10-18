@@ -132,6 +132,7 @@ const nav = [
       ["Attendance", Clock3],
       ["Shift management", CalendarCheck],
       ["Leave management", CalendarDays],
+      ["Leave Balance", CalendarDays],
     ],
   },
   {
@@ -1658,6 +1659,7 @@ export default function App() {
               </section>
             </>
           )}
+          {page === "Leave Balance" && <LeaveBalancePage user={user} />}
           {page === "Leave management" && (
             <LeavePage
               leaves={leaves}
@@ -3826,94 +3828,14 @@ function DocumentsPage({
   onToast: (s: string) => void;
 }) {
   const [employeeId, setEmployeeId] = useState(user.employeeId || ""),
-    [employeeSearch, setEmployeeSearch] = useState(employees.find((e) => e.id === (user.employeeId || "")) ? `${employees.find((e) => e.id === user.employeeId)?.firstName || ""} ${employees.find((e) => e.id === user.employeeId)?.lastName || ""}`.trim() : ""),
-    [documentTypes, setDocumentTypes] = useState<string[]>([]),
-    [documentType, setDocumentType] = useState(""),
+    [documentType, setDocumentType] = useState("Identity"),
     [issueDate, setIssueDate] = useState(""),
     [expiryDate, setExpiryDate] = useState(""),
     [notes, setNotes] = useState(""),
     [file, setFile] = useState<File | null>(null),
     [busy, setBusy] = useState(false);
   const canManage = !!user.permissions?.includes("documents.manage");
-  useEffect(() => {
-    let cancelled = false;
-    fetch("/api/v1/document-types", { credentials: "include" }).then(async (r) => {
-      if (!r.ok) return;
-      const data = await r.json();
-      if (!cancelled) {
-        const values = Array.isArray(data.items) ? data.items : [];
-        setDocumentTypes(values);
-        if (!documentType && values.length) setDocumentType(values.includes("Other") ? "Other" : values[0]);
-      }
-    }).catch(() => undefined);
-    return () => { cancelled = true; };
-  }, []);
   const canUpload = canManage || !!user.employeeId;
-  async function readSelectedFileText(selected: File): Promise<string> {
-    const ext = selected.name.toLowerCase().split(".").pop();
-    if (ext === "txt") return (await selected.text()).slice(0, 2_000_000);
-    if (ext === "pdf") {
-      // PDF text is extracted in the browser so metadata can be populated before upload.
-      // Scanned/image-only PDFs require OCR and will fall back to filename/manual entry.
-      try {
-        const pdfjsWindow = window as any;
-        if (!pdfjsWindow.pdfjsLib) {
-          await new Promise<void>((resolve, reject) => {
-            const script = document.createElement("script");
-            script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
-            script.onload = () => resolve();
-            script.onerror = () => reject(new Error("PDF text extraction library unavailable"));
-            document.head.appendChild(script);
-          });
-        }
-        const pdfjs = (window as any).pdfjsLib;
-        if (pdfjs?.GlobalWorkerOptions) pdfjs.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
-        if (!pdfjs?.getDocument) return "";
-        const pdf = await pdfjs.getDocument({ data: new Uint8Array(await selected.arrayBuffer()) }).promise;
-        const pages: string[] = [];
-        for (let i = 1; i <= Math.min(pdf.numPages, 40); i++) {
-          const page = await pdf.getPage(i);
-          const content = await page.getTextContent();
-          pages.push(content.items.map((item: any) => item.str || "").join(" "));
-        }
-        return pages.join(" ").slice(0, 2_000_000);
-      } catch { return ""; }
-    }
-    return "";
-  }
-  function populateDatesFromText(text: string, filename: string) {
-    const source = `${filename} ${text}`;
-    const toISO = (raw: string): string => {
-      const normalized = raw.trim().replace(/[.]/g, "/").replace(/-/g, "/");
-      let m = normalized.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
-      if (m) return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
-      m = normalized.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-      if (!m) return "";
-      // For document validity dates use day/month/year unless the first part is >12.
-      const first = Number(m[1]), second = Number(m[2]);
-      const day = first > 12 ? first : first;
-      const month = first > 12 ? second : second;
-      if (month < 1 || month > 12 || day < 1 || day > 31) return "";
-      return `${m[3]}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-    };
-    const date = String.raw`(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[./-]\d{1,2}[./-]\d{4})`;
-    const issueMatch = source.match(new RegExp(String.raw`(?:issue\s*date|date\s*of\s*issue|date\s*of\s*issuance|issued\s*(?:on|date)?|date\s*issued|valid\s*from|effective\s*date)\s*[:#-]?\s*${date}`, "i"));
-    const expiryMatch = source.match(new RegExp(String.raw`(?:expiry\s*date|date\s*of\s*expiry|expiration\s*date|date\s*of\s*expiration|expires?\s*(?:on|date)?|valid\s*(?:until|to)|validity\s*until)\s*[:#-]?\s*${date}`, "i"));
-    if (!issueDate && issueMatch?.[1]) setIssueDate(toISO(issueMatch[1]));
-    if (!expiryDate && expiryMatch?.[1]) setExpiryDate(toISO(expiryMatch[1]));
-    // If labels are absent, only infer from exactly two dates in the filename, never arbitrary dates in the document body.
-    if (!issueMatch && !expiryMatch) {
-      const filenameDates = filename.match(/(\d{4}-\d{2}-\d{2}|\d{1,2}[._/-]\d{1,2}[._/-]\d{4})/g) || [];
-      const parseFilenameDate = (v: string) => {
-        if (/^\d{4}-/.test(v)) return v;
-        const a = v.replace(/[._-]/g, "/").split("/");
-        if (a.length !== 3) return "";
-        return a[2].length === 4 ? `${a[2]}-${a[1].padStart(2,"0")}-${a[0].padStart(2,"0")}` : `${a[2]}-${a[1].padStart(2,"0")}-${a[0].padStart(2,"0")}`;
-      };
-      if (!issueDate && filenameDates[0]) setIssueDate(parseFilenameDate(filenameDates[0]));
-      if (!expiryDate && filenameDates[1]) setExpiryDate(parseFilenameDate(filenameDates[1]));
-    }
-  }
   async function upload(e: React.FormEvent) {
     e.preventDefault();
     if (!file) {
@@ -3940,8 +3862,6 @@ function DocumentsPage({
       }
       setFile(null);
       setNotes("");
-      const typesRes = await fetch("/api/v1/document-types", { credentials: "include" });
-      if (typesRes.ok) { const data = await typesRes.json(); setDocumentTypes(Array.isArray(data.items) ? data.items : []); }
       onToast("Document uploaded to PostgreSQL");
       await onRefresh();
     } catch (e) {
@@ -3987,36 +3907,36 @@ function DocumentsPage({
             <div className="form-grid">
               <label>
                 Employee
-                <input
+                <select
                   required
-                  list="document-employee-options"
                   disabled={!canManage}
-                  placeholder="Search employee name, number or email"
-                  value={canManage ? employeeSearch : (employees.find((e) => e.id === user.employeeId)?.firstName + " " + employees.find((e) => e.id === user.employeeId)?.lastName || "")}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    setEmployeeSearch(value);
-                    const match = employees.find((x) => `${x.firstName} ${x.lastName} · ${x.employeeNumber}` === value || `${x.firstName} ${x.lastName}` === value || x.email === value || x.employeeNumber === value);
-                    setEmployeeId(match?.id || "");
-                  }}
-                />
-                <datalist id="document-employee-options">
-                  {employees.map((e) => <option key={e.id} value={`${e.firstName} ${e.lastName} · ${e.employeeNumber}`} label={e.email} />)}
-                  {employees.map((e) => <option key={`${e.id}-email`} value={e.email} />)}
-                </datalist>
+                  value={canManage ? employeeId : user.employeeId || ""}
+                  onChange={(e) => setEmployeeId(e.target.value)}
+                >
+                  <option value="">Select employee</option>
+                  {employees.map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {e.firstName} {e.lastName} · {e.employeeNumber}
+                    </option>
+                  ))}
+                </select>
               </label>
               <label>
                 Document type
-                <input
-                  list="document-type-options"
-                  required
-                  placeholder="Choose or enter a document type"
+                <select
                   value={documentType}
                   onChange={(e) => setDocumentType(e.target.value)}
-                />
-                <datalist id="document-type-options">
-                  {documentTypes.map((x) => <option key={x} value={x} />)}
-                </datalist>
+                >
+                  {[
+                    "Identity",
+                    "Contract",
+                    "Right to work",
+                    "Qualification",
+                    "Other",
+                  ].map((x) => (
+                    <option key={x}>{x}</option>
+                  ))}
+                </select>
               </label>
               <label>
                 Issue date
@@ -4041,23 +3961,7 @@ function DocumentsPage({
                   type="file"
                   required
                   accept=".pdf,.png,.jpg,.jpeg,.docx,.xlsx,.txt"
-                  onChange={async (e) => {
-                    const selected = e.target.files?.[0] || null;
-                    setFile(selected);
-                    if (!selected) return;
-                    // Clear stale dates from the previously selected file before extracting this file's metadata.
-                    setIssueDate("");
-                    setExpiryDate("");
-                    const lower = selected.name.toLowerCase();
-                    const guess = documentTypes.find((x) => lower.includes(x.toLowerCase()));
-                    if (guess) setDocumentType(guess);
-                    else if (/contract|offer[-_ ]letter|employment/i.test(lower)) setDocumentType("Contract");
-                    else if (/passport|identity|national[-_ ]?id/i.test(lower)) setDocumentType("Identity");
-                    else if (/visa|right[-_ ]to[-_ ]work|residence[-_ ]permit/i.test(lower)) setDocumentType("Right to work");
-                    else if (/qualification|degree|diploma|certificate/i.test(lower)) setDocumentType("Qualification");
-                    const text = await readSelectedFileText(selected);
-                    populateDatesFromText(text, selected.name);
-                  }}
+                  onChange={(e) => setFile(e.target.files?.[0] || null)}
                 />
               </label>
               <label>
@@ -4124,7 +4028,7 @@ function DocumentsPage({
                           : "status-pending"
                       }`}
                     >
-                      {d.signingStatus === "Digitally signed" || d.signingStatus === "Signed" ? "Digitally signed" : d.signingStatus === "Pending signature" ? "Awaiting signature" : d.verificationStatus}
+                      {d.verificationStatus}
                     </span>
                   </td>
                   <td>
@@ -4166,6 +4070,31 @@ function DocumentsPage({
   );
 }
 
+function LeaveBalancePage({ user }: { user: User | null }) {
+  const [year, setYear] = useState(new Date().getFullYear());
+  const [items, setItems] = useState<any[]>([]);
+  const [settings, setSettings] = useState<any>({ roles: [], holidays: [] });
+  const [role, setRole] = useState("");
+  const [annualDays, setAnnualDays] = useState("25");
+  const [holidayDate, setHolidayDate] = useState("");
+  const [holidayName, setHolidayName] = useState("");
+  const [weekendDays, setWeekendDays] = useState<number[]>([0,6]);
+  const [message, setMessage] = useState("");
+  const canConfigure = user?.role?.toLowerCase() === "master admin";
+  const load = async () => {
+    const b = await request<any>(`/leave-balances?year=${year}`); setItems(b.items || []);
+    if (canConfigure) { const cfg = await request<any>("/leave-balances?settings=true"); setSettings(cfg); setWeekendDays(cfg.weekendDays || [0,6]); }
+  };
+  useEffect(() => { load().catch(e => setMessage(e.message)); }, [year, user?.role]);
+  const save = async (payload: any) => { await request("/leave-balances", { method: "POST", body: JSON.stringify(payload) }); await load(); setMessage("Saved successfully"); };
+  return <>
+    <div className="page-heading"><div><div className="eyebrow green-eyebrow">ANNUAL ENTITLEMENT</div><h1>Leave Balance</h1><p>Annual leave entitlement is prorated from the employee's joining date. Approved annual leave excludes weekends and configured public holidays.</p></div><label>Calendar year <select value={year} onChange={e=>setYear(Number(e.target.value))}>{[year-1,year,year+1].map(y=><option key={y} value={y}>{y}</option>)}</select></label></div>
+    {message && <p role="status">{message}</p>}
+    <section className="panel directory-panel"><div className="panel-heading"><div><h3>Employee leave balances</h3><p>Total entitlement, approved leave taken, and remaining balance</p></div></div><div className="table-wrap"><table><thead><tr><th>Employee</th><th>Role</th><th>Join date</th><th>Total leaves</th><th>Leaves taken</th><th>Remaining</th></tr></thead><tbody>{items.map(x=><tr key={x.employeeId}><td><strong>{x.employeeName}</strong><div className="muted">{x.employeeNumber}</div></td><td>{x.role || "—"}</td><td>{x.joinDate}</td><td>{Number(x.totalLeaves).toFixed(2)}</td><td>{Number(x.leavesTaken).toFixed(2)}</td><td><strong>{Number(x.remainingLeaves).toFixed(2)}</strong></td></tr>)}</tbody></table>{!items.length&&<div className="empty-state">No leave balances found for this year.</div>}</div></section>
+    {canConfigure && <section className="panel directory-panel"><div className="panel-heading"><div><h3>Master Admin configuration</h3><p>Set annual leave by role, public holidays, and non-working weekdays.</p></div></div><form className="form-grid" onSubmit={e=>{e.preventDefault();save({role,annualDays:Number(annualDays)}).catch(err=>setMessage(err.message));}}><label>Role name<input value={role} onChange={e=>setRole(e.target.value)} required placeholder="e.g. HR Admin" /></label><label>Annual leave days<input type="number" min="0" max="366" step="0.5" value={annualDays} onChange={e=>setAnnualDays(e.target.value)} required /></label><button className="primary" type="submit">Save role entitlement</button></form><form className="form-grid" onSubmit={e=>{e.preventDefault();save({date:holidayDate,name:holidayName}).then(()=>{setHolidayDate("");setHolidayName("");}).catch(err=>setMessage(err.message));}}><label>Public holiday date<input type="date" value={holidayDate} onChange={e=>setHolidayDate(e.target.value)} required /></label><label>Holiday name<input value={holidayName} onChange={e=>setHolidayName(e.target.value)} required /></label><button className="primary" type="submit">Add / update holiday</button></form><div><strong>Non-working weekdays</strong><div className="form-grid">{["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"].map((d,i)=><label key={d}><input type="checkbox" checked={weekendDays.includes(i)} onChange={e=>setWeekendDays(old=>e.target.checked?[...old,i]:old.filter(x=>x!==i))} /> {d}</label>)}</div><button className="primary" onClick={()=>save({weekendDays}).catch(err=>setMessage(err.message))}>Save weekend days</button></div><div className="table-wrap"><table><thead><tr><th>Role</th><th>Annual days</th></tr></thead><tbody>{settings.roles.map((x:any)=><tr key={x.role}><td>{x.role}</td><td>{x.annualDays}</td></tr>)}</tbody></table></div><div className="table-wrap"><table><thead><tr><th>Holiday</th><th>Date</th><th></th></tr></thead><tbody>{settings.holidays.map((x:any)=><tr key={x.date}><td>{x.name}</td><td>{x.date}</td><td><button className="secondary" onClick={()=>save({deleteHoliday:x.date}).catch(err=>setMessage(err.message))}>Remove</button></td></tr>)}</tbody></table></div></section>}
+  </>;
+}
+
 function pageIdForLabel(label: string): string {
   return (
     (
@@ -4177,6 +4106,7 @@ function pageIdForLabel(label: string): string {
         "Shift management": "shift-management",
         "Shift assignments": "shift-assignments",
         "Leave management": "leave-management",
+        "Leave Balance": "leave-balance",
         Payroll: "payroll",
         Documents: "documents",
         Approvals: "approvals",

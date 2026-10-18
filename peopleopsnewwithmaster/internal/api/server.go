@@ -75,6 +75,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/shift-assignments/{id}", s.protected(http.HandlerFunc(s.deleteShiftAssignment)))
 	mux.Handle("POST /api/v1/attendance/check-in", s.protected(http.HandlerFunc(s.checkIn)))
 	mux.Handle("POST /api/v1/attendance/check-out", s.protected(http.HandlerFunc(s.checkOut)))
+	mux.Handle("GET /api/v1/leave-balances", s.protected(http.HandlerFunc(s.leaveBalances)))
+	mux.Handle("POST /api/v1/leave-balances", s.protected(http.HandlerFunc(s.leaveBalances)))
+	mux.Handle("PUT /api/v1/leave-balances", s.protected(http.HandlerFunc(s.leaveBalances)))
 	mux.Handle("GET /api/v1/leave-requests", s.protected(http.HandlerFunc(s.leaveRequests)))
 	mux.Handle("POST /api/v1/leave-requests", s.protected(http.HandlerFunc(s.createLeave)))
 	mux.Handle("POST /api/v1/leave-requests/{id}/decision", s.protected(http.HandlerFunc(s.leaveDecision)))
@@ -174,6 +177,8 @@ func requiredPageForPath(path string) string {
 		return "attendance"
 	case strings.HasPrefix(path, "/api/v1/shifts"), strings.HasPrefix(path, "/api/v1/shift-assignments"), strings.HasPrefix(path, "/api/v1/actual-hours"):
 		return "shift-management"
+	case strings.HasPrefix(path, "/api/v1/leave-balances"):
+		return "leave-balance"
 	case strings.HasPrefix(path, "/api/v1/leave-requests"):
 		return "leave-management"
 	case strings.HasPrefix(path, "/api/v1/payroll"):
