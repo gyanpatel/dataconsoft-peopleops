@@ -75,6 +75,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/shift-assignments/{id}", s.protected(http.HandlerFunc(s.deleteShiftAssignment)))
 	mux.Handle("POST /api/v1/attendance/check-in", s.protected(http.HandlerFunc(s.checkIn)))
 	mux.Handle("POST /api/v1/attendance/check-out", s.protected(http.HandlerFunc(s.checkOut)))
+	mux.Handle("GET /api/v1/bonuses", s.protected(http.HandlerFunc(s.bonuses)))
+	mux.Handle("POST /api/v1/bonuses", s.protected(http.HandlerFunc(s.bonuses)))
 	mux.Handle("GET /api/v1/leave-balances", s.protected(http.HandlerFunc(s.leaveBalances)))
 	mux.Handle("POST /api/v1/leave-balances", s.protected(http.HandlerFunc(s.leaveBalances)))
 	mux.Handle("PUT /api/v1/leave-balances", s.protected(http.HandlerFunc(s.leaveBalances)))
@@ -177,6 +179,8 @@ func requiredPageForPath(path string) string {
 		return "attendance"
 	case strings.HasPrefix(path, "/api/v1/shifts"), strings.HasPrefix(path, "/api/v1/shift-assignments"), strings.HasPrefix(path, "/api/v1/actual-hours"):
 		return "shift-management"
+	case strings.HasPrefix(path, "/api/v1/bonuses"):
+		return "bonus-management"
 	case strings.HasPrefix(path, "/api/v1/leave-balances"):
 		return "leave-balance"
 	case strings.HasPrefix(path, "/api/v1/leave-requests"):
@@ -755,7 +759,6 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 type Shift struct {
 	ID           string `json:"id"`
 	Name         string `json:"name"`
-	Type         string `json:"type"`
 	StartTime    string `json:"startTime"`
 	EndTime      string `json:"endTime"`
 	BreakMinutes int    `json:"breakMinutes"`
@@ -765,7 +768,7 @@ type Shift struct {
 }
 
 func (s *Server) shifts(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.Store.DB.Query(s.Store.Ctx, `SELECT id,name,shift_type,start_time,end_time,break_minutes,grace_minutes,work_days,active FROM shifts ORDER BY active DESC,name`)
+	rows, err := s.Store.DB.Query(s.Store.Ctx, `SELECT id,name,start_time,end_time,break_minutes,grace_minutes,work_days,active FROM shifts ORDER BY active DESC,name`)
 	if err != nil {
 		writeError(w, 500, "database_error", "Could not load shifts")
 		return
@@ -775,7 +778,7 @@ func (s *Server) shifts(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var x Shift
 		var active bool
-		if err := rows.Scan(&x.ID, &x.Name, &x.Type, &x.StartTime, &x.EndTime, &x.BreakMinutes, &x.GraceMinutes, &x.WorkDays, &active); err != nil {
+		if err := rows.Scan(&x.ID, &x.Name, &x.StartTime, &x.EndTime, &x.BreakMinutes, &x.GraceMinutes, &x.WorkDays, &active); err != nil {
 			writeError(w, 500, "database_error", "Could not read shifts")
 			return
 		}
@@ -792,14 +795,13 @@ func (s *Server) createShift(w http.ResponseWriter, r *http.Request) {
 	}
 	var in struct {
 		Name         string `json:"name"`
-		Type         string `json:"type"`
 		StartTime    string `json:"startTime"`
 		EndTime      string `json:"endTime"`
 		BreakMinutes int    `json:"breakMinutes"`
 		GraceMinutes int    `json:"graceMinutes"`
 		WorkDays     string `json:"workDays"`
 	}
-	if decode(r, &in) != nil || strings.TrimSpace(in.Name) == "" || len(in.Name) > 80 || (in.Type != "NT" && in.Type != "OT") || !validClock(in.StartTime) || !validClock(in.EndTime) || in.BreakMinutes < 0 || in.BreakMinutes > 360 || in.GraceMinutes < 0 || in.GraceMinutes > 180 {
+	if decode(r, &in) != nil || strings.TrimSpace(in.Name) == "" || len(in.Name) > 80 || !validClock(in.StartTime) || !validClock(in.EndTime) || in.BreakMinutes < 0 || in.BreakMinutes > 360 || in.GraceMinutes < 0 || in.GraceMinutes > 180 {
 		writeError(w, 400, "validation_error", "Enter a shift name, valid start/end times, and valid break/grace minutes")
 		return
 	}
@@ -807,7 +809,7 @@ func (s *Server) createShift(w http.ResponseWriter, r *http.Request) {
 		in.WorkDays = "Mon,Tue,Wed,Thu,Fri"
 	}
 	id, now := auth.NewID(), time.Now().UTC()
-	_, err := s.Store.DB.Exec(s.Store.Ctx, `INSERT INTO shifts(id,name,shift_type,start_time,end_time,break_minutes,grace_minutes,work_days,active,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$10)`, id, strings.TrimSpace(in.Name), in.Type, parseShiftClock(in.StartTime), parseShiftClock(in.EndTime), in.BreakMinutes, in.GraceMinutes, in.WorkDays, now, now)
+	_, err := s.Store.DB.Exec(s.Store.Ctx, `INSERT INTO shifts(id,name,start_time,end_time,break_minutes,grace_minutes,work_days,active,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,true,$8,$9)`, id, strings.TrimSpace(in.Name), parseShiftClock(in.StartTime), parseShiftClock(in.EndTime), in.BreakMinutes, in.GraceMinutes, in.WorkDays, now, now)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			writeError(w, 409, "conflict", "A shift with this name already exists")
@@ -910,7 +912,7 @@ func (s *Server) deleteShiftAssignment(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) attendance(w http.ResponseWriter, r *http.Request) {
 	u := current(r)
-	rows, e := s.Store.DB.Query(s.Store.Ctx, `SELECT a.id,a.employee_id,e.first_name||' '||e.last_name,a.event_type,a.occurred_at,a.source,a.note,a.shift_type,a.latitude,a.longitude,a.accuracy_m FROM attendance_events a JOIN employees e ON e.id=a.employee_id WHERE ($1='' OR a.employee_id=$2) ORDER BY a.occurred_at DESC LIMIT 100`, u.EmployeeID, u.EmployeeID)
+	rows, e := s.Store.DB.Query(s.Store.Ctx, `SELECT a.id,a.employee_id,e.first_name||' '||e.last_name,a.event_type,a.occurred_at,a.source,a.note FROM attendance_events a JOIN employees e ON e.id=a.employee_id WHERE ($1='' OR a.employee_id=$2) ORDER BY a.occurred_at DESC LIMIT 100`, u.EmployeeID, u.EmployeeID)
 	if e != nil {
 		writeError(w, 500, "database_error", "Could not load attendance")
 		return
@@ -918,10 +920,9 @@ func (s *Server) attendance(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := []map[string]any{}
 	for rows.Next() {
-		var id, emp, name, typ, source, note, shiftType string
+		var id, emp, name, typ, source, note string
 		var at sql.NullTime
-		var lat, lon, accuracy sql.NullFloat64
-		if err := rows.Scan(&id, &emp, &name, &typ, &at, &source, &note, &shiftType, &lat, &lon, &accuracy); err != nil {
+		if err := rows.Scan(&id, &emp, &name, &typ, &at, &source, &note); err != nil {
 			log.Println("attendance: row scan failed:", err)
 			writeError(w, 500, "database_error", "Could not read attendance")
 			return
@@ -930,42 +931,15 @@ func (s *Server) attendance(w http.ResponseWriter, r *http.Request) {
 		if at.Valid {
 			occurred = at.Time
 		}
-		items = append(items, map[string]any{"id": id, "employeeId": emp, "employeeName": name, "type": typ, "occurredAt": occurred, "source": source, "note": note, "shiftType": shiftType, "latitude": nullableFloat(lat), "longitude": nullableFloat(lon), "accuracyM": nullableFloat(accuracy)})
+		items = append(items, map[string]any{"id": id, "employeeId": emp, "employeeName": name, "type": typ, "occurredAt": occurred, "source": source, "note": note})
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
-}
-func nullableFloat(v sql.NullFloat64) any {
-	if v.Valid {
-		return v.Float64
-	}
-	return nil
 }
 func (s *Server) punch(w http.ResponseWriter, r *http.Request, typ string) {
 	u := current(r)
 	if u.EmployeeID == "" {
 		writeError(w, 403, "forbidden", "Your user account is not linked to an employee profile")
 		return
-	}
-	var in struct {
-		Latitude  *float64 `json:"latitude"`
-		Longitude *float64 `json:"longitude"`
-		AccuracyM *float64 `json:"accuracyM"`
-	}
-	if r.Body != nil && r.ContentLength != 0 {
-		if err := decode(r, &in); err != nil {
-			log.Println("attendance: invalid punch payload:", err)
-			writeError(w, 400, "validation_error", "Invalid attendance location payload")
-			return
-		}
-	}
-	if (in.Latitude == nil) != (in.Longitude == nil) || (in.Latitude != nil && (*in.Latitude < -90 || *in.Latitude > 90 || *in.Longitude < -180 || *in.Longitude > 180)) {
-		writeError(w, 400, "validation_error", "Invalid device coordinates")
-		return
-	}
-	var shiftType string
-	_ = s.Store.DB.QueryRow(r.Context(), `SELECT s.shift_type FROM shift_assignments a JOIN shifts s ON s.id=a.shift_id WHERE a.employee_id=$1 AND a.shift_date=CURRENT_DATE AND a.status='Assigned' LIMIT 1`, u.EmployeeID).Scan(&shiftType)
-	if shiftType == "" {
-		shiftType = "NT"
 	}
 	var last string
 	e := s.Store.DB.QueryRow(s.Store.Ctx, `SELECT event_type FROM attendance_events WHERE employee_id=$1 ORDER BY occurred_at DESC LIMIT 1`, u.EmployeeID).Scan(&last)
@@ -983,7 +957,7 @@ func (s *Server) punch(w http.ResponseWriter, r *http.Request, typ string) {
 	}
 	now := time.Now().UTC()
 	id := auth.NewID()
-	_, e = s.Store.DB.Exec(s.Store.Ctx, `INSERT INTO attendance_events(id,employee_id,event_type,occurred_at,source,latitude,longitude,accuracy_m,shift_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, id, u.EmployeeID, typ, now, "web", in.Latitude, in.Longitude, in.AccuracyM, shiftType)
+	_, e = s.Store.DB.Exec(s.Store.Ctx, `INSERT INTO attendance_events(id,employee_id,event_type,occurred_at,source) VALUES($1,$2,$3,$4,$5)`, id, u.EmployeeID, typ, now, "web")
 	if e != nil {
 		writeError(w, 500, "database_error", "Could not record attendance")
 		return

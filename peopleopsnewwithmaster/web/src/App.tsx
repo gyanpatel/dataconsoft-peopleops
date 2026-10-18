@@ -139,6 +139,7 @@ const nav = [
     label: "OPERATIONS",
     items: [
       ["Payroll", Wallet],
+      ["Bonus management", Wallet],
       ["Documents", FileText],
       ["Approvals", FileCheck2],
       ["Reports & analytics", Activity],
@@ -173,7 +174,6 @@ export default function App() {
     [actualHours, setActualHours] = useState<any[]>([]),
     [shiftForm, setShiftForm] = useState({
       name: "",
-      type: "NT",
       startTime: "09:00",
       endTime: "17:00",
       breakMinutes: 30,
@@ -303,11 +303,7 @@ export default function App() {
   }
   async function punch(type: "check-in" | "check-out") {
     try {
-      const sendPunch = async (location?: GeolocationPosition) => request(`/attendance/${type}`, { method: "POST", body: JSON.stringify(location ? { latitude: location.coords.latitude, longitude: location.coords.longitude, accuracyM: location.coords.accuracy } : {}) });
-      if (typeof navigator !== "undefined" && navigator.geolocation) {
-        try { const position = await new Promise<GeolocationPosition>((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 7000, maximumAge: 30000 })); await sendPunch(position); }
-        catch { await sendPunch(); }
-      } else { await sendPunch(); }
+      await request(`/attendance/${type}`, { method: "POST", body: "{}" });
       setToast(
         type === "check-in" ? "You are checked in" : "You are checked out"
       );
@@ -1150,7 +1146,6 @@ export default function App() {
                         setToast("Shift template created");
                         setShiftForm({
                           name: "",
-                          type: "NT",
                           startTime: "09:00",
                           endTime: "17:00",
                           breakMinutes: 30,
@@ -1180,11 +1175,6 @@ export default function App() {
                       />
                     </label>
                     <div className="form-grid">
-                      <label className="field-label">Shift type
-                        <select value={shiftForm.type} onChange={(e) => setShiftForm((f) => ({ ...f, type: e.target.value }))}>
-                          <option value="NT">Normal time (NT)</option><option value="OT">OverTime (OT)</option>
-                        </select>
-                      </label>
                       <label className="field-label">
                         Start time
                         <input
@@ -1713,6 +1703,7 @@ export default function App() {
               </section>
             </>
           )}
+          {page === "Bonus management" && <BonusManagementPage onToast={setToast} />}
           {page === "Payroll" && (
             <PayrollPage user={user} employees={employees} onToast={setToast} />
           )}
@@ -2772,9 +2763,6 @@ function SalaryBreakupSection({
     permissions.includes("payroll.manage");
   const [data, setData] = useState<any>({
     grossPayMinor: 0,
-    baseAnnualPayMinor: 0,
-    bonusPayMinor: 0,
-    bonusMonth: 12,
     hourlyRateMinor: 0,
     overtimeMultiplier: 1.5,
     variablePayMinor: 0,
@@ -2816,7 +2804,6 @@ function SalaryBreakupSection({
           setData({
             ...data,
             [key]: Math.round(Number(e.target.value || 0) * 100),
-            ...(key === "baseAnnualPayMinor" ? { grossPayMinor: Math.round(Number(e.target.value || 0) * 100), hourlyRateMinor: Math.round(Number(e.target.value || 0) * 100 / 2880) } : {}),
           })
         }
       />
@@ -2830,7 +2817,7 @@ function SalaryBreakupSection({
         rate drives normal and overtime calculations.
       </p>
       <div className="form-grid">
-        {field("Base annual pay", "baseAnnualPayMinor")}
+        {field("Gross pay (annual)", "grossPayMinor")}
         {field("Hourly rate", "hourlyRateMinor")}
         {field("Variable pay", "variablePayMinor")}
         {field("Allowances", "allowancesMinor")}
@@ -4085,6 +4072,42 @@ function DocumentsPage({
   );
 }
 
+
+function BonusManagementPage({ onToast }: { onToast: (s: string) => void }) {
+  const [employees, setEmployees] = useState<any[]>([]);
+  const [roles, setRoles] = useState<string[]>([]);
+  const [role, setRole] = useState("All roles");
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<string[]>([]);
+  const [amount, setAmount] = useState("0.00");
+  const [month, setMonth] = useState(String(new Date().getMonth()+1));
+  const [history, setHistory] = useState<any[]>([]);
+  const [busy, setBusy] = useState(false);
+  async function load() {
+    const e = await request<any>("/employees?limit=200");
+    setEmployees(e.items || []);
+    setRoles(Array.from(new Set((e.items || []).map((x:any)=>x.roleName).filter(Boolean))).sort() as string[]);
+    const h = await request<any>("/bonuses"); setHistory(h.history || []);
+  }
+  useEffect(() => { load().catch(e=>onToast(e.message)); }, []);
+  const filtered = employees.filter(e => (role === "All roles" || e.roleName === role) && `${e.firstName} ${e.lastName} ${e.employeeNumber||""}`.toLowerCase().includes(query.toLowerCase()));
+  async function save() {
+    const minor = Math.round(Number(amount)*100);
+    if (!selected.length || !Number.isFinite(minor) || minor < 0) { onToast("Select employees and enter a valid bonus amount"); return; }
+    setBusy(true);
+    try { await request("/bonuses", {method:"POST", body:JSON.stringify({employeeIds:selected, bonusPayMinor:minor, bonusMonth:Number(month)})}); onToast("Bonus saved and history recorded"); setSelected([]); await load(); }
+    catch(e:any) { onToast(e.message); } finally { setBusy(false); }
+  }
+  return <><div className="page-heading"><div><div className="eyebrow green-eyebrow">PAY & REWARDS</div><h1>Bonus management</h1><p>Assign a bonus to one or multiple employees and choose the payment month.</p></div></div>
+    <section className="panel"><div className="panel-header"><h2>Create bonus</h2></div><div className="form-grid">
+      <label>Filter by role<select value={role} onChange={e=>setRole(e.target.value)}><option>All roles</option>{roles.map(r=><option key={r}>{r}</option>)}</select></label>
+      <label>Search employees<input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Name or employee number" /></label>
+      <label>Bonus amount (GBP)<input type="number" min="0" step="0.01" value={amount} onChange={e=>setAmount(e.target.value)} /></label>
+      <label>Bonus month<select value={month} onChange={e=>setMonth(e.target.value)}>{Array.from({length:12},(_,i)=><option key={i+1} value={i+1}>{new Date(2000,i,1).toLocaleString("en-GB",{month:"long"})}</option>)}</select></label>
+    </div><div className="table-wrap"><table><thead><tr><th><input aria-label="Select all filtered employees" type="checkbox" checked={filtered.length>0&&filtered.every(e=>selected.includes(e.id))} onChange={e=>setSelected(prev=>e.target.checked?Array.from(new Set([...prev,...filtered.map(x=>x.id)])):prev.filter(id=>!filtered.some(x=>x.id===id)))}/></th><th>Employee</th><th>Employee number</th><th>Role</th></tr></thead><tbody>{filtered.map(e=><tr key={e.id}><td><input aria-label={`Select ${e.firstName} ${e.lastName}`} type="checkbox" checked={selected.includes(e.id)} onChange={ev=>setSelected(prev=>ev.target.checked?[...prev,e.id]:prev.filter(id=>id!==e.id))}/></td><td>{e.firstName} {e.lastName}</td><td>{e.employeeNumber||"—"}</td><td>{e.roleName||"—"}</td></tr>)}</tbody></table>{!filtered.length&&<div className="empty-state">No employees match these filters.</div>}</div><div className="form-actions"><span>{selected.length} employee(s) selected</span><button className="btn btn-primary" disabled={busy||!selected.length} onClick={save}>{busy?"Saving…":"Apply bonus"}</button></div></section>
+    <section className="panel"><div className="panel-header"><h2>Bonus history</h2></div><div className="table-wrap"><table><thead><tr><th>Date</th><th>Employee</th><th>Bonus</th><th>Bonus month</th><th>Updated by</th></tr></thead><tbody>{history.map((h:any)=><tr key={h.id}><td>{h.createdAt?new Date(h.createdAt).toLocaleDateString("en-GB"):"—"}</td><td>{h.employeeName}</td><td>{money(h.bonusPayMinor||0)}</td><td>{new Date(2000,(h.bonusMonth||1)-1,1).toLocaleString("en-GB",{month:"long"})}</td><td>{h.updatedBy||"—"}</td></tr>)}</tbody></table>{!history.length&&<div className="empty-state">No bonus changes recorded yet.</div>}</div></section></>;
+}
+
 function LeaveBalancePage({ user }: { user: User | null }) {
   const [year, setYear] = useState(new Date().getFullYear());
   const [items, setItems] = useState<any[]>([]);
@@ -4261,6 +4284,7 @@ function pageIdForLabel(label: string): string {
         "Shift assignments": "shift-assignments",
         "Leave management": "leave-management",
         "Leave Balance": "leave-balance",
+        "Bonus management": "bonus-management",
         Payroll: "payroll",
         Documents: "documents",
         Approvals: "approvals",
