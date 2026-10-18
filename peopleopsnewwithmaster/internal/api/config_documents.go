@@ -7,12 +7,12 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"peopleops/internal/auth"
 )
-
 
 func (s *Server) appMaster(w http.ResponseWriter, r *http.Request) {
 	u := current(r)
@@ -148,6 +148,25 @@ func validConfig(pageID, pageName, key, label, typ string) bool {
 
 const maxDocumentBytes = 15 << 20
 
+func (s *Server) documentTypes(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.Store.DB.Query(r.Context(), `SELECT name FROM dcs_document_types WHERE active=true ORDER BY lower(name)`)
+	if err != nil {
+		writeError(w, 500, "database_error", "Could not load document types")
+		return
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			writeError(w, 500, "database_error", "Could not read document types")
+			return
+		}
+		items = append(items, name)
+	}
+	writeJSON(w, 200, map[string]any{"items": items})
+}
+
 func (s *Server) documents(w http.ResponseWriter, r *http.Request) {
 	u := current(r)
 	if r.Method == http.MethodPost && !s.hasPermission(r.Context(), u.Role, "documents.manage") && u.EmployeeID == "" {
@@ -155,7 +174,7 @@ func (s *Server) documents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		rows, err := s.Store.DB.Query(r.Context(), `SELECT d.id,d.employee_id,e.first_name||' '||e.last_name,d.document_name,d.document_type,d.mime_type,d.file_size,COALESCE(d.issue_date::text,''),COALESCE(d.expiry_date::text,''),d.verification_status,d.notes,d.uploaded_at FROM dcs_doc_store d JOIN employees e ON e.id=d.employee_id WHERE ($1 OR d.employee_id=$2) ORDER BY d.uploaded_at DESC LIMIT 500`, s.hasPermission(r.Context(), u.Role, "documents.manage"), u.EmployeeID)
+		rows, err := s.Store.DB.Query(r.Context(), `SELECT d.id,d.employee_id,e.first_name||' '||e.last_name,d.document_name,d.document_type,d.mime_type,d.file_size,COALESCE(d.issue_date::text,''),COALESCE(d.expiry_date::text,''),d.verification_status,d.notes,d.uploaded_at,COALESCE(d.signing_status,'Not required') FROM dcs_doc_store d JOIN employees e ON e.id=d.employee_id WHERE ($1 OR d.employee_id=$2) ORDER BY d.uploaded_at DESC LIMIT 500`, s.hasPermission(r.Context(), u.Role, "documents.manage"), u.EmployeeID)
 		if err != nil {
 			writeError(w, 500, "database_error", "Could not load documents")
 			return
@@ -166,11 +185,12 @@ func (s *Server) documents(w http.ResponseWriter, r *http.Request) {
 			var id, eid, name, docName, typ, mimeType, issue, expiry, status, notes string
 			var size int64
 			var uploaded time.Time
-			if err := rows.Scan(&id, &eid, &name, &docName, &typ, &mimeType, &size, &issue, &expiry, &status, &notes, &uploaded); err != nil {
+			var signingStatus string
+			if err := rows.Scan(&id, &eid, &name, &docName, &typ, &mimeType, &size, &issue, &expiry, &status, &notes, &uploaded, &signingStatus); err != nil {
 				writeError(w, 500, "database_error", "Could not read documents")
 				return
 			}
-			items = append(items, map[string]any{"id": id, "employeeId": eid, "employeeName": name, "documentName": docName, "documentType": typ, "mimeType": mimeType, "fileSize": size, "issueDate": issue, "expiryDate": expiry, "verificationStatus": status, "notes": notes, "uploadedAt": uploaded})
+			items = append(items, map[string]any{"id": id, "employeeId": eid, "employeeName": name, "documentName": docName, "documentType": typ, "mimeType": mimeType, "fileSize": size, "issueDate": issue, "expiryDate": expiry, "verificationStatus": status, "signingStatus": signingStatus, "notes": notes, "uploadedAt": uploaded})
 		}
 		writeJSON(w, 200, map[string]any{"items": items, "count": len(items)})
 		return
@@ -210,25 +230,74 @@ func (s *Server) documents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_employee", "Select a valid employee")
 		return
 	}
-	docType := strings.TrimSpace(r.FormValue("documentType"))
-	if docType == "" {
-		docType = "Other"
-	}
+
 	docName := filepath.Base(header.Filename)
 	if len(docName) > 180 {
 		docName = docName[len(docName)-180:]
 	}
+
 	ext := strings.ToLower(filepath.Ext(docName))
-	allowed := map[string]bool{".pdf": true, ".png": true, ".jpg": true, ".jpeg": true, ".docx": true, ".xlsx": true, ".txt": true}
+	allowed := map[string]bool{
+		".pdf":  true,
+		".png":  true,
+		".jpg":  true,
+		".jpeg": true,
+		".docx": true,
+		".xlsx": true,
+		".txt":  true,
+	}
 	if !allowed[ext] {
-		writeError(w, 400, "unsupported_file", "Allowed formats: PDF, PNG, JPG, DOCX, XLSX and TXT")
+		writeError(w, 400, "unsupported_file",
+			"Allowed formats: PDF, PNG, JPG, DOCX, XLSX and TXT")
 		return
 	}
+
+	// Read the file before attempting to infer its metadata.
 	data, err := io.ReadAll(io.LimitReader(file, maxDocumentBytes+1))
 	if err != nil || len(data) == 0 || len(data) > maxDocumentBytes {
-		writeError(w, 413, "file_too_large", "Document must be smaller than 15 MB")
+		writeError(w, 413, "file_too_large",
+			"Document must be smaller than 15 MB")
 		return
 	}
+
+	docType := strings.TrimSpace(r.FormValue("documentType"))
+	issueValue := strings.TrimSpace(r.FormValue("issueDate"))
+	expiryValue := strings.TrimSpace(r.FormValue("expiryDate"))
+
+	inferredType, inferredIssue, inferredExpiry :=
+		inferDocumentMetadata(docName, data)
+
+	if docType == "" {
+		docType = inferredType
+	}
+	if docType == "" {
+		docType = "Other"
+	}
+	if issueValue == "" {
+		issueValue = inferredIssue
+	}
+	if expiryValue == "" {
+		expiryValue = inferredExpiry
+	}
+
+	if len(docType) > 100 {
+		writeError(w, 400, "validation_error",
+			"Document type must be 100 characters or fewer")
+		return
+	}
+
+	if _, err := s.Store.DB.Exec(
+		r.Context(),
+		`INSERT INTO dcs_document_types(name,active)
+		 VALUES($1,true)
+		 ON CONFLICT(lower(name)) DO UPDATE SET active=true`,
+		docType,
+	); err != nil {
+		writeError(w, 500, "database_error",
+			"Could not register document type")
+		return
+	}
+
 	mimeType := http.DetectContentType(data)
 	if ext == ".docx" || ext == ".xlsx" {
 		mimeType = "application/octet-stream"
@@ -236,8 +305,9 @@ func (s *Server) documents(w http.ResponseWriter, r *http.Request) {
 	if ext == ".txt" {
 		mimeType = "text/plain; charset=utf-8"
 	}
-	issue := nullableDate(r.FormValue("issueDate"))
-	expiry := nullableDate(r.FormValue("expiryDate"))
+
+	issue := nullableDate(issueValue)
+	expiry := nullableDate(expiryValue)
 	notes := strings.TrimSpace(r.FormValue("notes"))
 	if len(notes) > 1000 {
 		writeError(w, 400, "validation_error", "Notes are limited to 1000 characters")
@@ -312,3 +382,60 @@ func (s *Server) documentDecision(w http.ResponseWriter, r *http.Request) {
 }
 
 func parseShiftClock(value string) time.Time { parsed, _ := time.Parse("15:04", value); return parsed }
+
+// inferDocumentMetadata uses the filename and readable PDF text fragments. It deliberately
+// leaves fields blank when dates cannot be identified confidently so the uploader can correct them.
+func inferDocumentMetadata(filename string, data []byte) (docType, issue, expiry string) {
+	lower := strings.ToLower(filename + " " + string(data))
+	for _, rule := range []struct {
+		words []string
+		typ   string
+	}{
+		{[]string{"contract", "employment agreement", "offer letter"}, "Contract"},
+		{[]string{"passport", "identity", "national id", "national-id"}, "Identity"},
+		{[]string{"right to work", "right-to-work", "visa", "residence permit"}, "Right to work"},
+		{[]string{"qualification", "degree", "certificate", "diploma"}, "Qualification"},
+		{[]string{"bank statement", "bank details"}, "Bank details"},
+		{[]string{"medical", "health insurance"}, "Medical"},
+	} {
+		for _, word := range rule.words {
+			if strings.Contains(lower, word) {
+				docType = rule.typ
+				break
+			}
+		}
+		if docType != "" {
+			break
+		}
+	}
+	// Common formats found in scanned/OCRed PDFs and filenames: YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY.
+	dateRE := regexp.MustCompile(`(?i)(\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{4})`)
+	matches := dateRE.FindAllString(string(data), 8)
+	if len(matches) == 0 {
+		matches = dateRE.FindAllString(filename, 8)
+	}
+	dates := []time.Time{}
+	for _, raw := range matches {
+		var parsed time.Time
+		var err error
+		for _, layout := range []string{"2006-01-02", "02/01/2006", "2/1/2006", "02-01-2006", "2-1-2006", "01/02/2006", "1/2/2006"} {
+			parsed, err = time.Parse(layout, raw)
+			if err == nil && parsed.Year() > 1900 && parsed.Year() < 2200 {
+				break
+			}
+		}
+		if err == nil && parsed.Year() > 1900 && parsed.Year() < 2200 {
+			dates = append(dates, parsed)
+		}
+	}
+	if len(dates) > 0 {
+		issue = dates[0].Format("2006-01-02")
+	}
+	if len(dates) > 1 {
+		expiry = dates[len(dates)-1].Format("2006-01-02")
+		if expiry < issue {
+			issue, expiry = expiry, issue
+		}
+	}
+	return
+}

@@ -56,8 +56,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/app-master", s.protected(http.HandlerFunc(s.appMaster)))
 	mux.Handle("DELETE /api/v1/app-master", s.protected(http.HandlerFunc(s.appMaster)))
 	mux.Handle("GET /api/v1/documents", s.protected(http.HandlerFunc(s.documents)))
+	mux.Handle("GET /api/v1/document-types", s.protected(http.HandlerFunc(s.documentTypes)))
 	mux.Handle("POST /api/v1/documents", s.protected(http.HandlerFunc(s.documents)))
 	mux.Handle("GET /api/v1/documents/{id}/download", s.protected(http.HandlerFunc(s.documentDownload)))
+	mux.HandleFunc("GET /sign/{token}", s.signEmploymentDocument)
+	mux.HandleFunc("POST /sign/{token}", s.signEmploymentDocument)
+	mux.HandleFunc("GET /sign/{token}/preview", s.previewEmploymentDocument)
 	mux.Handle("POST /api/v1/documents/{id}/decision", s.protected(http.HandlerFunc(s.documentDecision)))
 	mux.Handle("POST /api/v1/employees", s.protected(http.HandlerFunc(s.createEmployee)))
 	mux.Handle("PUT /api/v1/employees/{id}", s.protected(http.HandlerFunc(s.updateEmployee)))
@@ -700,6 +704,9 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, salaryErr := s.Store.DB.Exec(r.Context(), `INSERT INTO dsc_employee_salary_breakup(id,employee_id,gross_pay_minor,hourly_rate_minor,overtime_multiplier,currency,effective_from) VALUES($1,$2,$3,GREATEST(0,ROUND($3::numeric/2080)::bigint),1.5,'GBP',$4) ON CONFLICT(employee_id) DO NOTHING`, "salary-"+id, id, in.SalaryMinor, startDate); salaryErr != nil {
 		log.Println("employee create: initial salary breakup failed:", salaryErr)
+	}
+	if contractErr := s.createEmploymentContract(id); contractErr != nil {
+		log.Println("employee create: contract draft/signature email workflow could not complete:", contractErr)
 	}
 	if in.PhotoData != "" {
 		parts := strings.SplitN(in.PhotoData, ",", 2)

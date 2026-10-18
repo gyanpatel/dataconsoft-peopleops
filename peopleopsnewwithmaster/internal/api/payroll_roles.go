@@ -873,6 +873,11 @@ func (s *Server) salaryBreakup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Store.Audit(r.Context(), u.ID, "employee.salary_updated", "employee", empID, "Updated salary breakup", requestID(r))
+	if contractErr := s.createEmploymentContract(empID); contractErr != nil {
+		log.Println("employment contract: draft/signature email workflow could not complete:", contractErr)
+		// Salary was saved successfully. Do not misreport a successful salary save as failed;
+		// the contract workflow issue is logged for administrator follow-up.
+	}
 	writeJSON(w, 200, map[string]any{"message": "Salary breakup saved"})
 }
 

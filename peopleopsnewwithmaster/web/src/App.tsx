@@ -3826,13 +3826,28 @@ function DocumentsPage({
   onToast: (s: string) => void;
 }) {
   const [employeeId, setEmployeeId] = useState(user.employeeId || ""),
-    [documentType, setDocumentType] = useState("Identity"),
+    [employeeSearch, setEmployeeSearch] = useState(employees.find((e) => e.id === (user.employeeId || "")) ? `${employees.find((e) => e.id === user.employeeId)?.firstName || ""} ${employees.find((e) => e.id === user.employeeId)?.lastName || ""}`.trim() : ""),
+    [documentTypes, setDocumentTypes] = useState<string[]>([]),
+    [documentType, setDocumentType] = useState(""),
     [issueDate, setIssueDate] = useState(""),
     [expiryDate, setExpiryDate] = useState(""),
     [notes, setNotes] = useState(""),
     [file, setFile] = useState<File | null>(null),
     [busy, setBusy] = useState(false);
   const canManage = !!user.permissions?.includes("documents.manage");
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/v1/document-types", { credentials: "include" }).then(async (r) => {
+      if (!r.ok) return;
+      const data = await r.json();
+      if (!cancelled) {
+        const values = Array.isArray(data.items) ? data.items : [];
+        setDocumentTypes(values);
+        if (!documentType && values.length) setDocumentType(values.includes("Other") ? "Other" : values[0]);
+      }
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
   const canUpload = canManage || !!user.employeeId;
   async function upload(e: React.FormEvent) {
     e.preventDefault();
@@ -3860,6 +3875,8 @@ function DocumentsPage({
       }
       setFile(null);
       setNotes("");
+      const typesRes = await fetch("/api/v1/document-types", { credentials: "include" });
+      if (typesRes.ok) { const data = await typesRes.json(); setDocumentTypes(Array.isArray(data.items) ? data.items : []); }
       onToast("Document uploaded to PostgreSQL");
       await onRefresh();
     } catch (e) {
@@ -3905,36 +3922,36 @@ function DocumentsPage({
             <div className="form-grid">
               <label>
                 Employee
-                <select
+                <input
                   required
+                  list="document-employee-options"
                   disabled={!canManage}
-                  value={canManage ? employeeId : user.employeeId || ""}
-                  onChange={(e) => setEmployeeId(e.target.value)}
-                >
-                  <option value="">Select employee</option>
-                  {employees.map((e) => (
-                    <option key={e.id} value={e.id}>
-                      {e.firstName} {e.lastName} · {e.employeeNumber}
-                    </option>
-                  ))}
-                </select>
+                  placeholder="Search employee name, number or email"
+                  value={canManage ? employeeSearch : (employees.find((e) => e.id === user.employeeId)?.firstName + " " + employees.find((e) => e.id === user.employeeId)?.lastName || "")}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setEmployeeSearch(value);
+                    const match = employees.find((x) => `${x.firstName} ${x.lastName} · ${x.employeeNumber}` === value || `${x.firstName} ${x.lastName}` === value || x.email === value || x.employeeNumber === value);
+                    setEmployeeId(match?.id || "");
+                  }}
+                />
+                <datalist id="document-employee-options">
+                  {employees.map((e) => <option key={e.id} value={`${e.firstName} ${e.lastName} · ${e.employeeNumber}`} label={e.email} />)}
+                  {employees.map((e) => <option key={`${e.id}-email`} value={e.email} />)}
+                </datalist>
               </label>
               <label>
                 Document type
-                <select
+                <input
+                  list="document-type-options"
+                  required
+                  placeholder="Choose or enter a document type"
                   value={documentType}
                   onChange={(e) => setDocumentType(e.target.value)}
-                >
-                  {[
-                    "Identity",
-                    "Contract",
-                    "Right to work",
-                    "Qualification",
-                    "Other",
-                  ].map((x) => (
-                    <option key={x}>{x}</option>
-                  ))}
-                </select>
+                />
+                <datalist id="document-type-options">
+                  {documentTypes.map((x) => <option key={x} value={x} />)}
+                </datalist>
               </label>
               <label>
                 Issue date
@@ -3959,7 +3976,31 @@ function DocumentsPage({
                   type="file"
                   required
                   accept=".pdf,.png,.jpg,.jpeg,.docx,.xlsx,.txt"
-                  onChange={(e) => setFile(e.target.files?.[0] || null)}
+                  onChange={(e) => {
+                    const selected = e.target.files?.[0] || null;
+                    setFile(selected);
+                    if (!selected) return;
+                    const lower = selected.name.toLowerCase();
+                    const guess = documentTypes.find((x) => lower.includes(x.toLowerCase()));
+                    if (guess) setDocumentType(guess);
+                    else if (/contract|offer[-_ ]letter|employment/i.test(lower)) setDocumentType("Contract");
+                    else if (/passport|identity|national[-_ ]?id/i.test(lower)) setDocumentType("Identity");
+                    else if (/visa|right[-_ ]to[-_ ]work|residence[-_ ]permit/i.test(lower)) setDocumentType("Right to work");
+                    else if (/qualification|degree|diploma|certificate/i.test(lower)) setDocumentType("Qualification");
+                    const dates = selected.name.match(/(\d{4}-\d{2}-\d{2}|\d{1,2}[._/-]\d{1,2}[._/-]\d{4})/g) || [];
+                    const parseDate = (raw: string) => {
+                      if (/^\d{4}-/.test(raw)) return raw;
+                      const parts = raw.replace(/[._]/g, "/").replace(/-/g, "/").split("/");
+                      if (parts.length !== 3) return "";
+                      const [a,b,c] = parts;
+                      const day = c.length === 4 ? a : c;
+                      const month = c.length === 4 ? b : a;
+                      const year = c.length === 4 ? c : b;
+                      return `${year}-${month.padStart(2,"0")}-${day.padStart(2,"0")}`;
+                    };
+                    if (dates[0]) setIssueDate(parseDate(dates[0]));
+                    if (dates[1]) setExpiryDate(parseDate(dates[1]));
+                  }}
                 />
               </label>
               <label>
@@ -4026,7 +4067,7 @@ function DocumentsPage({
                           : "status-pending"
                       }`}
                     >
-                      {d.verificationStatus}
+                      {d.signingStatus === "Digitally signed" || d.signingStatus === "Signed" ? "Digitally signed" : d.signingStatus === "Pending signature" ? "Awaiting signature" : d.verificationStatus}
                     </span>
                   </td>
                   <td>
