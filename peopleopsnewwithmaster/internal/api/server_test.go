@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,7 +42,7 @@ func TestShiftAssignmentAndDuplicateProtection(t *testing.T) {
 	defer st.DB.Close()
 	const secret = "test-secret-that-is-long-enough-for-tests"
 	var userID string
-	if err := st.DB.QueryRow(`SELECT id FROM users WHERE email='admin@peopleops.local'`).Scan(&userID); err != nil {
+	if err := st.DB.QueryRow(context.Background(), `SELECT id FROM users WHERE email='admin@peopleops.local'`).Scan(&userID); err != nil {
 		t.Fatal(err)
 	}
 	token, err := auth.Issue(secret, auth.Claims{UserID: userID, Email: "admin@peopleops.local", Role: "Super Admin"})
@@ -49,10 +50,10 @@ func TestShiftAssignmentAndDuplicateProtection(t *testing.T) {
 		t.Fatal(err)
 	}
 	var shiftID, employeeID string
-	if err := st.DB.QueryRow(`SELECT id FROM shifts LIMIT 1`).Scan(&shiftID); err != nil {
+	if err := st.DB.QueryRow(context.Background(), `SELECT id FROM shifts LIMIT 1`).Scan(&shiftID); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.DB.QueryRow(`SELECT id FROM employees WHERE status='Active' LIMIT 1`).Scan(&employeeID); err != nil {
+	if err := st.DB.QueryRow(context.Background(), `SELECT id FROM employees WHERE status='Active' LIMIT 1`).Scan(&employeeID); err != nil {
 		t.Fatal(err)
 	}
 	h := (&Server{Store: st, Secret: secret}).Handler()
