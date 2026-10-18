@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log"
 	"net/http"
 	"net/smtp"
 	"os"
@@ -127,6 +128,9 @@ func (s *Server) signingDocument(r *http.Request) (string, string, []byte, error
 	var id, name string
 	var data []byte
 	err := s.Store.DB.QueryRow(r.Context(), `SELECT id,document_name,doc_file FROM dcs_doc_store WHERE signing_token_hash=$1 AND signing_status='Pending signature'`, hash).Scan(&id, &name, &data)
+	if err != nil {
+		log.Println("signingDocument", err, hash)
+	}
 	return id, name, data, err
 }
 
@@ -136,6 +140,11 @@ func (s *Server) previewEmploymentDocument(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "This signing link is invalid, expired, or already used.", http.StatusGone)
 		return
 	}
+	// The global application middleware denies framing by default. This PDF is
+	// intentionally embedded in the public, token-protected signing page, so
+	// allow same-origin framing for this response only.
+	w.Header().Del("X-Frame-Options")
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'self'")
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", name))
 	w.Header().Set("X-Content-Type-Options", "nosniff")

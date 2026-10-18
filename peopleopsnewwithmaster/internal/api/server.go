@@ -708,8 +708,15 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 502, "welcome_email_failed", "Employee account was not created because the welcome email could not be sent. Check SMTP configuration and try again.")
 		return
 	}
-	if _, salaryErr := s.Store.DB.Exec(r.Context(), `INSERT INTO dsc_employee_salary_breakup(id,employee_id,gross_pay_minor,hourly_rate_minor,overtime_multiplier,currency,effective_from) VALUES($1,$2,$3,GREATEST(0,ROUND($3::numeric/2080)::bigint),1.5,'GBP',$4) ON CONFLICT(employee_id) DO NOTHING`, "salary-"+id, id, in.SalaryMinor, startDate); salaryErr != nil {
-		log.Println("employee create: initial salary breakup failed:", salaryErr)
+	query := `INSERT INTO dsc_employee_salary_breakup(
+		id, employee_id, gross_pay_minor, hourly_rate_minor, overtime_multiplier, currency, effective_from
+	) VALUES (
+		$1, $2, $3, GREATEST(0, ROUND($3::numeric / 2080)::bigint), 1.5, 'GBP', $4
+	) ON CONFLICT (employee_id) DO NOTHING`
+
+	if _, salaryErr := s.Store.DB.Exec(r.Context(), query, "salary-"+id, id, in.SalaryMinor, startDate); salaryErr != nil {
+		// Handle the error here
+		writeError(w, 502, "welcome_email_failed", "Employee account was not created because the welcome email could not be sent. Check SMTP configuration and try again.")
 	}
 	if contractErr := s.createEmploymentContract(id); contractErr != nil {
 		log.Println("employee create: contract draft/signature email workflow could not complete:", contractErr)
