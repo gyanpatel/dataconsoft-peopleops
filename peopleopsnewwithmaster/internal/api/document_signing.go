@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/smtp"
 	"os"
+	"regexp"
 	"strings"
 
 	"peopleops/internal/auth"
@@ -53,9 +54,9 @@ func signingToken() (string, string, error) {
 // createEmploymentContract currently creates the app's configured draft summary. A sanitized, approved
 // contract template must be configured before this is suitable for issuing binding employment terms.
 func (s *Server) createEmploymentContract(employeeID string) error {
-	var first, last, email, department, title, location, start, currency string
+	var first, last, email, employeeNumber, department, title, location, start, currency string
 	var gross int64
-	err := s.Store.DB.QueryRow(s.Store.Ctx, `SELECT e.first_name,e.last_name,e.email,e.department,e.job_title,e.location,e.start_date::text,COALESCE(b.gross_pay_minor,e.salary_minor),COALESCE(b.currency,e.currency,'GBP') FROM employees e LEFT JOIN dsc_employee_salary_breakup b ON b.employee_id=e.id WHERE e.id=$1`, employeeID).Scan(&first, &last, &email, &department, &title, &location, &start, &gross, &currency)
+	err := s.Store.DB.QueryRow(s.Store.Ctx, `SELECT e.first_name,e.last_name,e.email,COALESCE(e.employee_number,''),COALESCE(e.department,''),COALESCE(e.job_title,''),COALESCE(e.location,''),e.start_date::text,COALESCE(b.gross_pay_minor,e.salary_minor),COALESCE(b.currency,e.currency,'GBP') FROM employees e LEFT JOIN dsc_employee_salary_breakup b ON b.employee_id=e.id WHERE e.id=$1`, employeeID).Scan(&first, &last, &email, &employeeNumber, &department, &title, &location, &start, &gross, &currency)
 	if err != nil {
 		return err
 	}
@@ -70,20 +71,33 @@ func (s *Server) createEmploymentContract(employeeID string) error {
 	if err != nil {
 		return err
 	}
-	if lookupErr == nil && existingStatus == "Pending signature" {
-		if _, err = s.Store.DB.Exec(s.Store.Ctx, `UPDATE dcs_doc_store SET signing_token_hash=$2, updated_at=now() WHERE id=$1 AND signing_status='Pending signature'`, existingID, hash); err != nil {
-			return err
-		}
-		return sendSigningRequest(email, first, token)
-	}
+	// If a pending document already exists, regenerate its populated content below
+	// before issuing a refreshed signing link. This prevents stale placeholder text.
 	if lookupErr != nil && lookupErr != pgx.ErrNoRows {
 		return lookupErr
 	}
-	content := fmt.Sprintf("DRAFT EMPLOYMENT TERMS — FOR REVIEW AND SIGNATURE\n\nEmployee: %s %s\nEmail: %s\nDepartment: %s\nPosition: %s\nWork location: %s\nEmployment start date: %s\nGross annual salary: %s %.2f\n\nThis automatically generated document is a draft summary, not a substitute for your organisation's approved employment contract. HR must verify and attach the approved contractual terms before relying on it.\n\nEmployee signature: __________________________________\nDate: _______________________________________________\n", first, last, email, department, title, location, start, currency, float64(gross)/100)
+	fields := map[string]string{
+		"first_name": first, "last_name": last, "employee_name": strings.TrimSpace(first + " " + last),
+		"email": email, "employee_number": employeeNumber, "department": department,
+		"job_title": title, "position": title, "location": location, "work_location": location,
+		"start_date": start, "employment_start_date": start,
+		"salary_currency": currency, "currency": currency,
+		"annual_salary":       fmt.Sprintf("%.2f", float64(gross)/100),
+		"gross_annual_salary": fmt.Sprintf("%.2f", float64(gross)/100),
+		"gross_salary":        fmt.Sprintf("%s %.2f", currency, float64(gross)/100),
+	}
+	content, err := renderEmploymentContractTemplate(fields)
+	if err != nil {
+		return err
+	}
 	pdf := simplePDF(content)
-	id := auth.NewID()
-	name := fmt.Sprintf("Employment contract - %s %s - draft.pdf", first, last)
-	_, err = s.Store.DB.Exec(s.Store.Ctx, `INSERT INTO dcs_doc_store(id,employee_id,document_name,document_type,mime_type,file_size,doc_file,verification_status,notes,signing_status,signing_token_hash) VALUES($1,$2,$3,'Contract','application/pdf',$4,$5,'Pending','Automatically generated draft; HR review required before use','Pending signature',$6)`, id, employeeID, name, len(pdf), pdf, hash)
+	name := fmt.Sprintf("Employment contract - %s %s - draft.pdf", safeDocumentName(first), safeDocumentName(last))
+	if lookupErr == nil && existingStatus == "Pending signature" {
+		_, err = s.Store.DB.Exec(s.Store.Ctx, `UPDATE dcs_doc_store SET document_name=$2,mime_type='application/pdf',file_size=$3,doc_file=$4,signing_token_hash=$5,updated_at=now(),notes='Automatically generated draft; HR review required before use' WHERE id=$1 AND signing_status='Pending signature'`, existingID, name, len(pdf), pdf, hash)
+	} else {
+		id := auth.NewID()
+		_, err = s.Store.DB.Exec(s.Store.Ctx, `INSERT INTO dcs_doc_store(id,employee_id,document_name,document_type,mime_type,file_size,doc_file,verification_status,notes,signing_status,signing_token_hash) VALUES($1,$2,$3,'Contract','application/pdf',$4,$5,'Pending','Automatically generated draft; HR review required before use','Pending signature',$6)`, id, employeeID, name, len(pdf), pdf, hash)
+	}
 	if err != nil {
 		return err
 	}
@@ -91,6 +105,82 @@ func (s *Server) createEmploymentContract(employeeID string) error {
 		return err
 	}
 	return nil
+}
+
+// Employment contract templates are UTF-8 text files containing {{ field name }}
+// placeholders. Set EMPLOYMENT_CONTRACT_TEMPLATE to the template path. Unknown
+// placeholders are intentionally left visible so HR can spot missing mappings.
+const defaultEmploymentContractTemplate = `DRAFT EMPLOYMENT TERMS FOR REVIEW AND SIGNATURE
+
+Employee: {{ employee name }}
+Employee number: {{ employee number }}
+Email: {{ email }}
+Department: {{ department }}
+Position: {{ position }}
+Work location: {{ work location }}
+Employment start date: {{ employment start date }}
+Gross annual salary: {{ gross salary }}
+
+This automatically generated document is a draft summary, not a substitute for your organisation's approved employment contract. HR must verify and attach the approved contractual terms before relying on it.
+
+Employee signature: __________________________________
+Date: _______________________________________________
+`
+
+var employmentPlaceholderPattern = regexp.MustCompile(`\{\{\s*([^{}]+?)\s*\}\}`)
+
+func renderEmploymentContractTemplate(fields map[string]string) (string, error) {
+	templateText := defaultEmploymentContractTemplate
+	if path := strings.TrimSpace(os.Getenv("EMPLOYMENT_CONTRACT_TEMPLATE")); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read employment contract template: %w", err)
+		}
+		templateText = string(data)
+	}
+	values := make(map[string]string, len(fields)*2)
+	for key, value := range fields {
+		values[normalizeEmploymentField(key)] = value
+	}
+	aliases := map[string]string{
+		"employee name": "employee_name", "employee number": "employee_number",
+		"first name": "first_name", "last name": "last_name",
+		"work location": "work_location", "job title": "job_title", "position": "position",
+		"start date": "start_date", "employment start date": "employment_start_date",
+		"annual salary": "annual_salary", "gross annual salary": "gross_annual_salary",
+		"gross salary": "gross_salary", "salary currency": "salary_currency",
+	}
+	return employmentPlaceholderPattern.ReplaceAllStringFunc(templateText, func(match string) string {
+		parts := employmentPlaceholderPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		key := normalizeEmploymentField(parts[1])
+		if canonical, ok := aliases[key]; ok {
+			key = canonical
+		}
+		if value, ok := values[key]; ok {
+			return value
+		}
+		return match
+	}), nil
+}
+
+func normalizeEmploymentField(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "-", " ")
+	value = strings.Join(strings.Fields(value), "_")
+	return value
+}
+
+func safeDocumentName(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.ReplaceAll(value, "/", "-")
+	value = strings.ReplaceAll(value, "\\", "-")
+	if value == "" {
+		return "employee"
+	}
+	return value
 }
 
 func sendSigningRequest(to, first, token string) error {
