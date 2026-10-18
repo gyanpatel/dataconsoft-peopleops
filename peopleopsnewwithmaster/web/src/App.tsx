@@ -3849,6 +3849,71 @@ function DocumentsPage({
     return () => { cancelled = true; };
   }, []);
   const canUpload = canManage || !!user.employeeId;
+  async function readSelectedFileText(selected: File): Promise<string> {
+    const ext = selected.name.toLowerCase().split(".").pop();
+    if (ext === "txt") return (await selected.text()).slice(0, 2_000_000);
+    if (ext === "pdf") {
+      // PDF text is extracted in the browser so metadata can be populated before upload.
+      // Scanned/image-only PDFs require OCR and will fall back to filename/manual entry.
+      try {
+        const pdfjsWindow = window as any;
+        if (!pdfjsWindow.pdfjsLib) {
+          await new Promise<void>((resolve, reject) => {
+            const script = document.createElement("script");
+            script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+            script.onload = () => resolve();
+            script.onerror = () => reject(new Error("PDF text extraction library unavailable"));
+            document.head.appendChild(script);
+          });
+        }
+        const pdfjs = (window as any).pdfjsLib;
+        if (pdfjs?.GlobalWorkerOptions) pdfjs.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+        if (!pdfjs?.getDocument) return "";
+        const pdf = await pdfjs.getDocument({ data: new Uint8Array(await selected.arrayBuffer()) }).promise;
+        const pages: string[] = [];
+        for (let i = 1; i <= Math.min(pdf.numPages, 40); i++) {
+          const page = await pdf.getPage(i);
+          const content = await page.getTextContent();
+          pages.push(content.items.map((item: any) => item.str || "").join(" "));
+        }
+        return pages.join(" ").slice(0, 2_000_000);
+      } catch { return ""; }
+    }
+    return "";
+  }
+  function populateDatesFromText(text: string, filename: string) {
+    const source = `${filename} ${text}`;
+    const toISO = (raw: string): string => {
+      const normalized = raw.trim().replace(/[.]/g, "/").replace(/-/g, "/");
+      let m = normalized.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+      if (m) return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+      m = normalized.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (!m) return "";
+      // For document validity dates use day/month/year unless the first part is >12.
+      const first = Number(m[1]), second = Number(m[2]);
+      const day = first > 12 ? first : first;
+      const month = first > 12 ? second : second;
+      if (month < 1 || month > 12 || day < 1 || day > 31) return "";
+      return `${m[3]}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    };
+    const date = String.raw`(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[./-]\d{1,2}[./-]\d{4})`;
+    const issueMatch = source.match(new RegExp(String.raw`(?:issue\s*date|date\s*of\s*issue|date\s*of\s*issuance|issued\s*(?:on|date)?|date\s*issued|valid\s*from|effective\s*date)\s*[:#-]?\s*${date}`, "i"));
+    const expiryMatch = source.match(new RegExp(String.raw`(?:expiry\s*date|date\s*of\s*expiry|expiration\s*date|date\s*of\s*expiration|expires?\s*(?:on|date)?|valid\s*(?:until|to)|validity\s*until)\s*[:#-]?\s*${date}`, "i"));
+    if (!issueDate && issueMatch?.[1]) setIssueDate(toISO(issueMatch[1]));
+    if (!expiryDate && expiryMatch?.[1]) setExpiryDate(toISO(expiryMatch[1]));
+    // If labels are absent, only infer from exactly two dates in the filename, never arbitrary dates in the document body.
+    if (!issueMatch && !expiryMatch) {
+      const filenameDates = filename.match(/(\d{4}-\d{2}-\d{2}|\d{1,2}[._/-]\d{1,2}[._/-]\d{4})/g) || [];
+      const parseFilenameDate = (v: string) => {
+        if (/^\d{4}-/.test(v)) return v;
+        const a = v.replace(/[._-]/g, "/").split("/");
+        if (a.length !== 3) return "";
+        return a[2].length === 4 ? `${a[2]}-${a[1].padStart(2,"0")}-${a[0].padStart(2,"0")}` : `${a[2]}-${a[1].padStart(2,"0")}-${a[0].padStart(2,"0")}`;
+      };
+      if (!issueDate && filenameDates[0]) setIssueDate(parseFilenameDate(filenameDates[0]));
+      if (!expiryDate && filenameDates[1]) setExpiryDate(parseFilenameDate(filenameDates[1]));
+    }
+  }
   async function upload(e: React.FormEvent) {
     e.preventDefault();
     if (!file) {
@@ -3976,10 +4041,13 @@ function DocumentsPage({
                   type="file"
                   required
                   accept=".pdf,.png,.jpg,.jpeg,.docx,.xlsx,.txt"
-                  onChange={(e) => {
+                  onChange={async (e) => {
                     const selected = e.target.files?.[0] || null;
                     setFile(selected);
                     if (!selected) return;
+                    // Clear stale dates from the previously selected file before extracting this file's metadata.
+                    setIssueDate("");
+                    setExpiryDate("");
                     const lower = selected.name.toLowerCase();
                     const guess = documentTypes.find((x) => lower.includes(x.toLowerCase()));
                     if (guess) setDocumentType(guess);
@@ -3987,19 +4055,8 @@ function DocumentsPage({
                     else if (/passport|identity|national[-_ ]?id/i.test(lower)) setDocumentType("Identity");
                     else if (/visa|right[-_ ]to[-_ ]work|residence[-_ ]permit/i.test(lower)) setDocumentType("Right to work");
                     else if (/qualification|degree|diploma|certificate/i.test(lower)) setDocumentType("Qualification");
-                    const dates = selected.name.match(/(\d{4}-\d{2}-\d{2}|\d{1,2}[._/-]\d{1,2}[._/-]\d{4})/g) || [];
-                    const parseDate = (raw: string) => {
-                      if (/^\d{4}-/.test(raw)) return raw;
-                      const parts = raw.replace(/[._]/g, "/").replace(/-/g, "/").split("/");
-                      if (parts.length !== 3) return "";
-                      const [a,b,c] = parts;
-                      const day = c.length === 4 ? a : c;
-                      const month = c.length === 4 ? b : a;
-                      const year = c.length === 4 ? c : b;
-                      return `${year}-${month.padStart(2,"0")}-${day.padStart(2,"0")}`;
-                    };
-                    if (dates[0]) setIssueDate(parseDate(dates[0]));
-                    if (dates[1]) setExpiryDate(parseDate(dates[1]));
+                    const text = await readSelectedFileText(selected);
+                    populateDatesFromText(text, selected.name);
                   }}
                 />
               </label>
