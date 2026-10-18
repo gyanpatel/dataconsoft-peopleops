@@ -569,7 +569,7 @@ func (s *Server) calculatePayroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	rows, err := tx.Query(r.Context(), `SELECT h.employee_id,COALESCE(SUM(h.normal_minutes),0),COALESCE(SUM(h.overtime_minutes),0),COALESCE(b.hourly_rate_minor,0),COALESCE(b.overtime_multiplier,1.5),COALESCE(b.variable_pay_minor,0),COALESCE(b.allowances_minor,0),COALESCE(b.deductions_minor,0),COALESCE(b.currency,'GBP') FROM dcs_employees_actual_hours h LEFT JOIN dsc_employee_salary_breakup b ON b.employee_id=h.employee_id WHERE h.work_date BETWEEN $1 AND $2 AND h.payment_pending=true AND h.approved=true GROUP BY h.employee_id,b.hourly_rate_minor,b.overtime_multiplier,b.variable_pay_minor,b.allowances_minor,b.deductions_minor,b.currency`, start, end)
+	rows, err := tx.Query(r.Context(), `SELECT h.employee_id,COALESCE(SUM(h.normal_minutes),0),COALESCE(SUM(h.overtime_minutes),0),COALESCE(b.hourly_rate_minor,0),COALESCE(b.overtime_multiplier,1.5),COALESCE(b.base_annual_pay_minor,b.gross_pay_minor,0),COALESCE(b.variable_pay_minor,0),COALESCE(b.allowances_minor,0),COALESCE(b.deductions_minor,0),COALESCE(b.bonus_pay_minor,0),COALESCE(b.bonus_month,12),COALESCE(b.currency,'GBP') FROM dcs_employees_actual_hours h LEFT JOIN dsc_employee_salary_breakup b ON b.employee_id=h.employee_id WHERE h.work_date BETWEEN $1 AND $2 AND h.payment_pending=true AND h.approved=true GROUP BY h.employee_id,b.hourly_rate_minor,b.overtime_multiplier,b.base_annual_pay_minor,b.gross_pay_minor,b.variable_pay_minor,b.allowances_minor,b.deductions_minor,b.bonus_pay_minor,b.bonus_month,b.currency`, start, end)
 	if err != nil {
 		log.Println("payroll calculation: hours query failed:", err)
 		writeError(w, 500, "database_error", "Could not calculate payroll")
@@ -578,14 +578,15 @@ func (s *Server) calculatePayroll(w http.ResponseWriter, r *http.Request) {
 	type calc struct {
 		emp, currency        string
 		normal, ot           int
-		rate                 int64
+		rate, annual, bonus  int64
 		mult                 float64
 		variable, allow, ded int64
+		bonusMonth           int
 	}
 	list := []calc{}
 	for rows.Next() {
 		var x calc
-		if err := rows.Scan(&x.emp, &x.normal, &x.ot, &x.rate, &x.mult, &x.variable, &x.allow, &x.ded, &x.currency); err != nil {
+		if err := rows.Scan(&x.emp, &x.normal, &x.ot, &x.rate, &x.mult, &x.annual, &x.variable, &x.allow, &x.ded, &x.bonus, &x.bonusMonth, &x.currency); err != nil {
 			rows.Close()
 			log.Println("payroll calculation: hours scan failed:", err)
 			writeError(w, 500, "database_error", "Could not read hours for payroll")
@@ -609,10 +610,17 @@ func (s *Server) calculatePayroll(w http.ResponseWriter, r *http.Request) {
 	}
 	created := 0
 	for _, x := range list {
-		base := x.rate * int64(x.normal) / 60
+		base := (x.annual + x.variable + x.allow - x.ded) / 12
+		if base < 0 {
+			base = 0
+		}
 		ot := int64(float64(x.rate*int64(x.ot)) / 60 * x.mult)
-		gross := base + ot + x.variable + x.allow
-		net := gross - x.ded
+		// Bonus is added only in the configured calendar month.
+		if int(end.Month()) == x.bonusMonth {
+			base += x.bonus
+		}
+		gross := base + ot
+		net := gross
 		if net < 0 {
 			net = 0
 		}
@@ -823,17 +831,18 @@ func (s *Server) salaryBreakup(w http.ResponseWriter, r *http.Request) {
 	}
 	empID := r.PathValue("id")
 	if r.Method == http.MethodGet {
-		var gross, rate, variable, allow, ded int64
+		var gross, base, rate, variable, allow, ded, bonus int64
+		var bonusMonth int
 		var mult float64
 		var currency string
 		var effective time.Time
-		err := s.Store.DB.QueryRow(r.Context(), `SELECT gross_pay_minor,hourly_rate_minor,overtime_multiplier,variable_pay_minor,allowances_minor,deductions_minor,currency,effective_from FROM dsc_employee_salary_breakup WHERE employee_id=$1`, empID).Scan(&gross, &rate, &mult, &variable, &allow, &ded, &currency, &effective)
+		err := s.Store.DB.QueryRow(r.Context(), `SELECT gross_pay_minor,base_annual_pay_minor,hourly_rate_minor,overtime_multiplier,variable_pay_minor,allowances_minor,deductions_minor,bonus_pay_minor,bonus_month,currency,effective_from FROM dsc_employee_salary_breakup WHERE employee_id=$1`, empID).Scan(&gross, &base, &rate, &mult, &variable, &allow, &ded, &bonus, &bonusMonth, &currency, &effective)
 		if err != nil {
 			log.Println("salary breakup: lookup failed:", err)
 			writeError(w, 404, "not_found", "Salary breakup not found")
 			return
 		}
-		writeJSON(w, 200, map[string]any{"grossPayMinor": gross, "hourlyRateMinor": rate, "overtimeMultiplier": mult, "variablePayMinor": variable, "allowancesMinor": allow, "deductionsMinor": ded, "currency": strings.TrimSpace(currency), "effectiveFrom": effective.Format("2006-01-02")})
+		writeJSON(w, 200, map[string]any{"grossPayMinor": gross, "baseAnnualPayMinor": base, "bonusPayMinor": bonus, "bonusMonth": bonusMonth, "hourlyRateMinor": rate, "overtimeMultiplier": mult, "variablePayMinor": variable, "allowancesMinor": allow, "deductionsMinor": ded, "currency": strings.TrimSpace(currency), "effectiveFrom": effective.Format("2006-01-02")})
 		return
 	}
 	if r.Method != http.MethodPut {
@@ -842,6 +851,9 @@ func (s *Server) salaryBreakup(w http.ResponseWriter, r *http.Request) {
 	}
 	var in struct {
 		Gross      int64   `json:"grossPayMinor"`
+		Base       int64   `json:"baseAnnualPayMinor"`
+		Bonus      int64   `json:"bonusPayMinor"`
+		BonusMonth int     `json:"bonusMonth"`
 		Rate       int64   `json:"hourlyRateMinor"`
 		Multiplier float64 `json:"overtimeMultiplier"`
 		Variable   int64   `json:"variablePayMinor"`
@@ -850,7 +862,7 @@ func (s *Server) salaryBreakup(w http.ResponseWriter, r *http.Request) {
 		Currency   string  `json:"currency"`
 		Effective  string  `json:"effectiveFrom"`
 	}
-	if err := decode(r, &in); err != nil || in.Gross < 0 || in.Rate < 0 || in.Multiplier < 1 || in.Multiplier > 5 || in.Variable < 0 || in.Allow < 0 || in.Ded < 0 {
+	if err := decode(r, &in); err != nil || in.Gross < 0 || in.Base < 0 || in.Bonus < 0 || in.BonusMonth < 1 || in.BonusMonth > 12 || in.Rate < 0 || in.Multiplier < 1 || in.Multiplier > 5 || in.Variable < 0 || in.Allow < 0 || in.Ded < 0 {
 		log.Println("salary breakup: invalid payload:", err)
 		writeError(w, 400, "validation_error", "Enter valid non-negative pay values and overtime multiplier between 1 and 5")
 		return
@@ -866,10 +878,15 @@ func (s *Server) salaryBreakup(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		effective = time.Now().UTC()
 	}
-	_, err = s.Store.DB.Exec(r.Context(), `INSERT INTO dsc_employee_salary_breakup(id,employee_id,gross_pay_minor,hourly_rate_minor,overtime_multiplier,variable_pay_minor,allowances_minor,deductions_minor,currency,effective_from,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now()) ON CONFLICT(employee_id) DO UPDATE SET gross_pay_minor=EXCLUDED.gross_pay_minor,hourly_rate_minor=EXCLUDED.hourly_rate_minor,overtime_multiplier=EXCLUDED.overtime_multiplier,variable_pay_minor=EXCLUDED.variable_pay_minor,allowances_minor=EXCLUDED.allowances_minor,deductions_minor=EXCLUDED.deductions_minor,currency=EXCLUDED.currency,effective_from=EXCLUDED.effective_from,updated_at=now()`, auth.NewID(), empID, in.Gross, in.Rate, in.Multiplier, in.Variable, in.Allow, in.Ded, strings.ToUpper(in.Currency), effective)
+	_, err = s.Store.DB.Exec(r.Context(), `INSERT INTO dsc_employee_salary_breakup(id,employee_id,gross_pay_minor,base_annual_pay_minor,hourly_rate_minor,overtime_multiplier,variable_pay_minor,allowances_minor,deductions_minor,bonus_pay_minor,bonus_month,currency,effective_from,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now()) ON CONFLICT(employee_id) DO UPDATE SET gross_pay_minor=EXCLUDED.gross_pay_minor,base_annual_pay_minor=EXCLUDED.base_annual_pay_minor,hourly_rate_minor=EXCLUDED.hourly_rate_minor,overtime_multiplier=EXCLUDED.overtime_multiplier,variable_pay_minor=EXCLUDED.variable_pay_minor,allowances_minor=EXCLUDED.allowances_minor,deductions_minor=EXCLUDED.deductions_minor,bonus_pay_minor=EXCLUDED.bonus_pay_minor,bonus_month=EXCLUDED.bonus_month,currency=EXCLUDED.currency,effective_from=EXCLUDED.effective_from,updated_at=now()`, auth.NewID(), empID, in.Gross, in.Base, in.Rate, in.Multiplier, in.Variable, in.Allow, in.Ded, in.Bonus, in.BonusMonth, strings.ToUpper(in.Currency), effective)
 	if err != nil {
 		log.Println("salary breakup: save failed:", err)
 		writeError(w, 500, "database_error", "Could not save salary breakup")
+		return
+	}
+	if _, syncErr := s.Store.DB.Exec(r.Context(), `UPDATE employees SET salary_minor=$2,updated_at=now() WHERE id=$1`, empID, in.Base); syncErr != nil {
+		log.Println("salary breakup: syncing employees.salary_minor failed:", syncErr)
+		writeError(w, 500, "database_error", "Salary breakup saved but employee salary sync failed")
 		return
 	}
 	s.Store.Audit(r.Context(), u.ID, "employee.salary_updated", "employee", empID, "Updated salary breakup", requestID(r))
