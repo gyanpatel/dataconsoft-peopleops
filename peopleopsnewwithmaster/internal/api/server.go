@@ -20,6 +20,8 @@ import (
 
 	"peopleops/internal/auth"
 	"peopleops/internal/store"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type Server struct {
@@ -1069,16 +1071,32 @@ func (s *Server) createLeave(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "validation_error", "End date must be on or after start date")
 		return
 	}
-	targetEmployeeID := u.EmployeeID
-	if canBookForOthers && strings.TrimSpace(in.EmployeeID) != "" {
-		targetEmployeeID = strings.TrimSpace(in.EmployeeID)
+	// Resolve the logged-in user's employee profile for self-service leave. Some
+	// older user accounts have employee_id unset even though their email matches
+	// the employee record, so use that stable relationship as a fallback.
+	targetEmployeeID := strings.TrimSpace(u.EmployeeID)
+	requestedEmployeeID := strings.TrimSpace(in.EmployeeID)
+	if canBookForOthers && requestedEmployeeID != "" && requestedEmployeeID != "self" {
+		targetEmployeeID = requestedEmployeeID
+	}
+	if targetEmployeeID == "" && (requestedEmployeeID == "" || requestedEmployeeID == "self") {
+		err := s.Store.DB.QueryRow(r.Context(), `SELECT id FROM employees WHERE lower(email)=lower($1)`, strings.TrimSpace(u.Email)).Scan(&targetEmployeeID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			log.Printf("leave create: resolve employee for user %s (%s): %v", u.ID, u.Email, err)
+			writeError(w, 500, "database_error", "Could not resolve your employee profile")
+			return
+		}
 	}
 	if targetEmployeeID == "" {
-		writeError(w, 400, "validation_error", "Select an employee")
+		writeError(w, 400, "employee_profile_missing", "Your login is not linked to an employee profile. Ask HR to link your account to your employee record.")
 		return
 	}
 	var employeeExists bool
-	if err := s.Store.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM employees WHERE id=$1)`, targetEmployeeID).Scan(&employeeExists); err != nil || !employeeExists {
+	if err := s.Store.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM employees WHERE id=$1)`, targetEmployeeID).Scan(&employeeExists); err != nil {
+		log.Printf("leave create: validate employee %s for user %s: %v", targetEmployeeID, u.ID, err)
+		writeError(w, 500, "database_error", "Could not validate the selected employee")
+		return
+	} else if !employeeExists {
 		writeError(w, 400, "validation_error", "Selected employee was not found")
 		return
 	}

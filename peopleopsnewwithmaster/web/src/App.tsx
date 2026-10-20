@@ -3445,6 +3445,7 @@ function LeaveForm({
     employeeId: "",
   });
   const [employeeSearch, setEmployeeSearch] = useState("");
+  const [leaveFor, setLeaveFor] = useState<"self" | "other">("self");
   const [busy, setBusy] = useState(false);
   const employeeMatches = employees.filter((e) => `${e.firstName} ${e.lastName} ${e.employeeNumber} ${e.email}`.toLowerCase().includes(employeeSearch.toLowerCase())).slice(0, 8);
   return (
@@ -3460,9 +3461,15 @@ function LeaveForm({
         }
       }}
     >
-      {canBookForOthers && <label>Employee (search by name or employee number) *
+      {canBookForOthers && <label>Apply leave for
+        <select value={leaveFor} onChange={(e) => { const next = e.target.value as "self" | "other"; setLeaveFor(next); setV({ ...v, employeeId: next === "self" ? "self" : "" }); setEmployeeSearch(""); }}>
+          <option value="self">Myself</option>
+          <option value="other">Another employee</option>
+        </select>
+      </label>}
+      {canBookForOthers && leaveFor === "other" && <label>Employee (search by name or employee number) *
         <input value={employeeSearch} onChange={(e) => { setEmployeeSearch(e.target.value); setV({ ...v, employeeId: "" }); }} placeholder="Start typing an employee…" autoComplete="off" required={!v.employeeId} />
-        {employeeSearch && !v.employeeId && <div className="soft-search-results">{employeeMatches.map((employee) => <button type="button" className="review-btn" key={employee.id} onClick={() => { setV({ ...v, employeeId: employee.id }); setEmployeeSearch(`${employee.firstName} ${employee.lastName} (${employee.employeeNumber})`); }}>{employee.firstName} {employee.lastName} · {employee.employeeNumber}</button>)}{!employeeMatches.length && <small>No matching employees</small>}</div>}
+        {employeeSearch && !v.employeeId && <div className="soft-search-results">{employeeMatches.map((employee) => <button type="button" className="review-btn" key={employee.id} onClick={() => { setV({ ...v, employeeId: employee.id }); setEmployeeSearch(`${employee.firstName} ${employee.lastName} (${employee.employeeNumber})`); }}>{employee.firstName} · {employee.lastName} · {employee.employeeNumber}</button>)}{!employeeMatches.length && <small>No matching employees</small>}</div>}
       </label>}
       <label>
         Leave type
