@@ -587,17 +587,17 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Status       string         `json:"status"`
-		Number       string         `json:"employeeNumber"`
-		First        string         `json:"firstName"`
-		Last         string         `json:"lastName"`
-		Email        string         `json:"email"`
-		Department   string         `json:"department"`
-		Title        string         `json:"jobTitle"`
-		Location     string         `json:"location"`
-		Type         string         `json:"employmentType"`
-		StartDate    string         `json:"startDate"`
-		SalaryMinor  int64          `json:"salaryMinor"`
+		Status     string `json:"status"`
+		Number     string `json:"employeeNumber"`
+		First      string `json:"firstName"`
+		Last       string `json:"lastName"`
+		Email      string `json:"email"`
+		Department string `json:"department"`
+		Title      string `json:"jobTitle"`
+		Location   string `json:"location"`
+		Type       string `json:"employmentType"`
+		StartDate  string `json:"startDate"`
+		//SalaryMinor  int64          `json:"salaryMinor"`
 		CustomFields map[string]any `json:"customFields"`
 		PhotoData    string         `json:"photoData"`
 		PhotoName    string         `json:"photoName"`
@@ -610,7 +610,7 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(strings.TrimSpace(in.First)) < 1 || len(strings.TrimSpace(in.First)) > 80 || len(strings.TrimSpace(in.Last)) < 1 || len(strings.TrimSpace(in.Last)) > 80 || !strings.Contains(strings.TrimSpace(in.Email), "@") || len(in.Email) > 254 || len(strings.TrimSpace(in.Department)) < 1 || len(strings.TrimSpace(in.Title)) < 1 {
-		log.Printf("employee create: validation failed: firstName=%q lastName=%q email=%q department=%q jobTitle=%q salaryMinor=%d", in.First, in.Last, in.Email, in.Department, in.Title, in.SalaryMinor)
+		log.Printf("employee create: validation failed: firstName=%q lastName=%q email=%q department=%q jobTitle=%q", in.First, in.Last, in.Email, in.Department, in.Title)
 		writeError(w, 400, "validation_error", "Complete the required fields with valid values: first name, last name, email, department, job title")
 		return
 	}
@@ -651,7 +651,7 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "database_error", "Could not validate employee configuration")
 		return
 	}
-	values := map[string]any{"firstName": in.First, "lastName": in.Last, "email": in.Email, "employeeNumber": in.Number, "department": in.Department, "jobTitle": in.Title, "location": in.Location, "employmentType": in.Type, "startDate": in.StartDate, "salary": in.SalaryMinor, "salaryMinor": in.SalaryMinor}
+	values := map[string]any{"firstName": in.First, "lastName": in.Last, "email": in.Email, "employeeNumber": in.Number, "department": in.Department, "jobTitle": in.Title, "location": in.Location, "employmentType": in.Type, "startDate": in.StartDate}
 	for k, v := range in.CustomFields {
 		values[k] = v
 	}
@@ -752,7 +752,7 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 		$1, $2, $3, GREATEST(0, ROUND($3::numeric / 2080)::bigint), 1.5, 'GBP', $4
 	) ON CONFLICT (employee_id) DO NOTHING`
 
-	if _, salaryErr := s.Store.DB.Exec(r.Context(), query, "salary-"+id, id, in.SalaryMinor, startDate); salaryErr != nil {
+	if _, salaryErr := s.Store.DB.Exec(r.Context(), query, "salary-"+id, id, 0, startDate); salaryErr != nil {
 		log.Printf("employee create: employee %s was created, but salary setup failed: %v", id, salaryErr)
 		// The employee and linked user already exist. Return one response and make
 		// the partial setup visible rather than falsely reporting an email failure.

@@ -4178,7 +4178,7 @@ function LeaveBalancePage({ user }: { user: User | null }) {
   const [items, setItems] = useState<any[]>([]);
   const [settings, setSettings] = useState<any>({ roles: [], holidays: [] });
   const [role, setRole] = useState("");
-  const [annualDays, setAnnualDays] = useState("25");
+  const [annualDays, setAnnualDays] = useState("30");
   const [holidayDate, setHolidayDate] = useState("");
   const [holidayName, setHolidayName] = useState("");
   const [weekendDays, setWeekendDays] = useState<number[]>([0, 6]);
