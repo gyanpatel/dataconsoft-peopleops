@@ -53,6 +53,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/employees", s.protected(http.HandlerFunc(s.employees)))
 	mux.Handle("GET /api/v1/employee-hierarchy", s.protected(http.HandlerFunc(s.employeeHierarchy)))
 	mux.Handle("POST /api/v1/auth/change-password", s.protected(http.HandlerFunc(s.changePassword)))
+	mux.Handle("GET /api/v1/app-settings", s.protected(http.HandlerFunc(s.appSettings)))
+	mux.Handle("PUT /api/v1/app-settings", s.protected(http.HandlerFunc(s.appSettings)))
 	mux.Handle("GET /api/v1/app-master", s.protected(http.HandlerFunc(s.appMaster)))
 	mux.Handle("POST /api/v1/app-master", s.protected(http.HandlerFunc(s.appMaster)))
 	mux.Handle("PUT /api/v1/app-master", s.protected(http.HandlerFunc(s.appMaster)))
@@ -201,7 +203,7 @@ func requiredPageForPath(path string) string {
 		return "reports-analytics"
 	case strings.HasPrefix(path, "/api/v1/app-master"):
 		return "employees"
-	case strings.HasPrefix(path, "/api/v1/roles"), strings.HasPrefix(path, "/api/v1/role-pages"), strings.HasPrefix(path, "/api/v1/salary-algorithm"):
+	case strings.HasPrefix(path, "/api/v1/app-settings"), strings.HasPrefix(path, "/api/v1/roles"), strings.HasPrefix(path, "/api/v1/role-pages"), strings.HasPrefix(path, "/api/v1/salary-algorithm"):
 		return "settings"
 	default:
 		return ""
