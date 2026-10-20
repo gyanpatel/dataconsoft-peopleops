@@ -87,6 +87,8 @@ type Metrics = {
   payrollStatus: string;
 };
 const API = "/api/v1";
+let appCurrency = "GBP";
+let appTimeZone = "Asia/Dubai";
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (!headers.has("Content-Type"))
@@ -115,7 +117,7 @@ const formatShiftTime = (value: unknown) => {
 const money = (minor: number) =>
   new Intl.NumberFormat("en-GB", {
     style: "currency",
-    currency: "GBP",
+    currency: appCurrency,
     maximumFractionDigits: 0,
   }).format(minor / 100);
 const initials = (name: string) =>
@@ -268,6 +270,7 @@ export default function App() {
       .then((x) => {
         setUser(x.user);
         setMustChangePassword(!!x.mustChangePassword);
+        request<{currency:string;timezone:string}>("/app-settings").then(cfg => { appCurrency=cfg.currency || "GBP"; appTimeZone=cfg.timezone || "Asia/Dubai"; }).catch(() => {});
       })
       .catch(() => setUser(null));
   }, []);
@@ -303,6 +306,7 @@ export default function App() {
       );
       setUser(x.user);
       setMustChangePassword(!!x.mustChangePassword);
+      request<{currency:string;timezone:string}>("/app-settings").then(cfg => { appCurrency=cfg.currency || "GBP"; appTimeZone=cfg.timezone || "Asia/Dubai"; }).catch(() => {});
       setPage("Dashboard");
     } catch (e) {
       setLoginError(e instanceof Error ? e.message : "Could not sign in");
@@ -1037,6 +1041,7 @@ export default function App() {
                   icon={<CalendarDays />}
                   label="Today"
                   value={new Date().toLocaleDateString("en-GB", {
+                      timeZone: appTimeZone,
                     day: "2-digit",
                     month: "short",
                   })}
@@ -1091,7 +1096,7 @@ export default function App() {
                           </td>
                           <td>
                             {new Date(a.occurredAt).toLocaleString("en-GB", {
-                              timeZone: "UTC",
+                              timeZone: appTimeZone,
                             })}
                           </td>
                           <td>{a.source}</td>
@@ -1850,7 +1855,7 @@ export default function App() {
                       {audit.map((a) => (
                         <tr key={a.id}>
                           <td>
-                            {new Date(a.createdAt).toLocaleString("en-GB")}
+                            {new Date(a.createdAt).toLocaleString("en-GB", { timeZone: appTimeZone })}
                           </td>
                           <td>
                             <code>{a.action}</code>
@@ -1876,6 +1881,7 @@ export default function App() {
           {page === "Settings" &&
             (user.permissions?.includes("app.configure") ? (
               <>
+                <GlobalApplicationSettings onToast={setToast} onSaved={() => { setToast("Global settings applied"); }} />
                 <MasterConfigPage onToast={setToast} />
                 <NotificationSettingsPage onToast={setToast} />
                 <RoleAccessPage onToast={setToast} />
@@ -2501,7 +2507,7 @@ function EmployeeTable({
                   <td>{e.employmentType || "—"}</td>
                   <td>
                     {e.startDate
-                      ? new Date(e.startDate).toLocaleDateString("en-GB")
+                      ? new Date(e.startDate).toLocaleDateString("en-GB", { timeZone: appTimeZone })
                       : "—"}
                   </td>
                 </>
@@ -2557,7 +2563,7 @@ function EmployeeDetails({
     employmentType: e.employmentType,
     status: e.status,
     startDate: e.startDate
-      ? new Date(e.startDate).toLocaleDateString("en-GB")
+      ? new Date(e.startDate).toLocaleDateString("en-GB", { timeZone: appTimeZone })
       : "" 
   };
   const configured = (fields || [])
@@ -2806,7 +2812,7 @@ function SalaryBreakupSection({
     variablePayMinor: 0,
     allowancesMinor: 0,
     deductionsMinor: 0,
-    currency: "AED",
+    currency: appCurrency,
     effectiveFrom: new Date().toISOString().slice(0, 10),
   });
   const [busy, setBusy] = useState(false);
@@ -2879,10 +2885,8 @@ function SalaryBreakupSection({
           <input
             maxLength={3}
             disabled={!allowed}
-            value={data.currency || "GBP"}
-            onChange={(e) =>
-              setData({ ...data, currency: e.target.value.toUpperCase() })
-            }
+            value={appCurrency}
+            onChange={() => setData({ ...data, currency: appCurrency })}
           />
         </label>
         <label>
@@ -3214,7 +3218,7 @@ function EmployeeForm({
           return;
         }
         const invalidLength = renderFields.find((f: any) => {
-          if (v[f.fieldKey] == null || v[f.fieldKey] === "" || f.dataType === "number" || f.dataType === "checkbox") return false;
+          if (v[f.fieldKey] == null || v[f.fieldKey] === "" || f.dataType === "checkbox") return false;
           const length = String(v[f.fieldKey]).length;
           return (f.minLength != null && length < Number(f.minLength)) || (f.maxLength != null && length > Number(f.maxLength));
         });
@@ -3226,9 +3230,9 @@ function EmployeeForm({
             if (!standard.has(f.fieldKey))
               customFields[f.fieldKey] =
                 f.dataType === "number"
-                  ? v[f.fieldKey] === ""
-                    ? null
-                    : Number(v[f.fieldKey])
+                  ? v[f.fieldKey] === "" || v[f.fieldKey] == null
+                  ? null
+                  : String(v[f.fieldKey])
                   : f.dataType === "checkbox"
                   ? Boolean(v[f.fieldKey])
                   : v[f.fieldKey] ?? "";
@@ -3597,6 +3601,13 @@ function LeaveForm({
     </form>
   );
 }
+function GlobalApplicationSettings({onToast,onSaved}:{onToast:(s:string)=>void;onSaved:()=>void}) {
+ const [currency,setCurrency]=useState("GBP"); const [timezone,setTimezone]=useState("Asia/Dubai"); const [busy,setBusy]=useState(false); const [error,setError]=useState("");
+ useEffect(()=>{request<{currency:string;timezone:string}>("/app-settings").then(x=>{setCurrency(x.currency||"GBP");setTimezone(x.timezone||"Asia/Dubai")}).catch(e=>setError(e.message))},[]);
+ async function save(){setBusy(true);setError("");try{const x=await request<{currency:string;timezone:string;message?:string}>("/app-settings",{method:"PUT",body:JSON.stringify({currency,timezone})});appCurrency=x.currency;appTimeZone=x.timezone;onToast(x.message||"Global settings saved");onSaved();}catch(e){setError(e instanceof Error?e.message:"Could not save settings")}finally{setBusy(false)}}
+ return <section className="panel directory-panel"><div className="panel-heading"><div><h3>Global application settings</h3><p>Single source of truth for currency formatting and the application time zone.</p></div></div>{error&&<div className="error-banner">{error}</div>}<div className="form-grid"><label>Default currency (ISO 4217)<select value={currency} onChange={e=>setCurrency(e.target.value)}><option value="GBP">GBP — Pound sterling</option><option value="AED">AED — UAE dirham</option><option value="USD">USD — US dollar</option><option value="EUR">EUR — Euro</option><option value="SAR">SAR — Saudi riyal</option><option value="INR">INR — Indian rupee</option></select></label><label>Application time zone<select value={timezone} onChange={e=>setTimezone(e.target.value)}>{["Asia/Dubai","Europe/London","Europe/Paris","UTC","Asia/Kolkata","Asia/Riyadh","America/New_York","America/Los_Angeles","Asia/Singapore"].map(z=><option key={z} value={z}>{z}</option>)}</select></label></div><div className="modal-actions"><button className="primary" disabled={busy} onClick={save}>{busy?"Saving…":"Save global settings"}</button></div><p className="subcell">Currency updates apply to global UI formatting and generated documents that use the default currency. Restart the API service after changing the time zone so server-side timestamps use the new setting.</p></section>
+}
+
 function MasterConfigPage({ onToast }: { onToast: (s: string) => void }) {
   const [items, setItems] = useState<any[]>([]),
     [page, setPage] = useState("employees"),
@@ -4035,7 +4046,7 @@ function DocumentsPage({
           <div className="modal-actions"><button type="button" className="secondary" onClick={addRow}>+ Add another document</button><button className="primary" disabled={busy || !rows.length || !documentTypes.length}>{busy ? `Uploading ${rows.length} document(s)…` : `Upload all ${rows.length} document(s)`} <FileText size={16}/></button></div>
         </form>
       </section>}
-      <section className="panel directory-panel"><div className="panel-heading"><div><h3>Stored documents</h3><p>Authenticated download and verification status.</p></div><button className="secondary" onClick={onRefresh}>Refresh</button></div><div className="table-wrap"><table><thead><tr><th>Document</th><th>Employee</th><th>Type</th><th>Expiry</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead><tbody>{documents.map((d) => <tr key={d.id}><td><b>{d.documentName}</b><small className="subcell">Uploaded {new Date(d.uploadedAt).toLocaleDateString("en-GB")}</small></td><td>{d.employeeName}</td><td>{d.documentType}</td><td>{d.expiryDate || "—"}</td><td>{(d.fileSize / 1024).toFixed(0)} KB</td><td><span className={`status ${d.verificationStatus === "Verified" ? "status-active" : d.verificationStatus === "Rejected" ? "status-rejected" : "status-pending"}`}>{d.verificationStatus}</span></td><td><a className="review-btn" href={`/api/v1/documents/${d.id}/download`}>Download</a>{canManage && d.verificationStatus !== "Verified" && <><button className="review-btn" onClick={() => verify(d.id, "Verified")}>Verify</button><button className="danger-btn" onClick={() => verify(d.id, "Rejected")}>Reject</button></>}</td></tr>)}</tbody></table>{!documents.length && <div className="empty-state">No documents stored yet. Upload an employee document to begin.</div>}</div></section>
+      <section className="panel directory-panel"><div className="panel-heading"><div><h3>Stored documents</h3><p>Authenticated download and verification status.</p></div><button className="secondary" onClick={onRefresh}>Refresh</button></div><div className="table-wrap"><table><thead><tr><th>Document</th><th>Employee</th><th>Type</th><th>Expiry</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead><tbody>{documents.map((d) => <tr key={d.id}><td><b>{d.documentName}</b><small className="subcell">Uploaded {new Date(d.uploadedAt).toLocaleDateString("en-GB", { timeZone: appTimeZone })}</small></td><td>{d.employeeName}</td><td>{d.documentType}</td><td>{d.expiryDate || "—"}</td><td>{(d.fileSize / 1024).toFixed(0)} KB</td><td><span className={`status ${d.verificationStatus === "Verified" ? "status-active" : d.verificationStatus === "Rejected" ? "status-rejected" : "status-pending"}`}>{d.verificationStatus}</span></td><td><a className="review-btn" href={`/api/v1/documents/${d.id}/download`}>Download</a>{canManage && d.verificationStatus !== "Verified" && <><button className="review-btn" onClick={() => verify(d.id, "Verified")}>Verify</button><button className="danger-btn" onClick={() => verify(d.id, "Rejected")}>Reject</button></>}</td></tr>)}</tbody></table>{!documents.length && <div className="empty-state">No documents stored yet. Upload an employee document to begin.</div>}</div></section>
     </>
   );
 }
@@ -4072,7 +4083,7 @@ function BonusManagementPage({ onToast }: { onToast: (s: string) => void }) {
       <label>Bonus amount (GBP)<input type="number" min="0" step="0.01" value={amount} onChange={e=>setAmount(e.target.value)} /></label>
       <label>Bonus month<select value={month} onChange={e=>setMonth(e.target.value)}>{Array.from({length:12},(_,i)=><option key={i+1} value={i+1}>{new Date(2000,i,1).toLocaleString("en-GB",{month:"long"})}</option>)}</select></label>
     </div><div className="table-wrap"><table><thead><tr><th><input aria-label="Select all filtered employees" type="checkbox" checked={filtered.length>0&&filtered.every(e=>selected.includes(e.id))} onChange={e=>setSelected(prev=>e.target.checked?Array.from(new Set([...prev,...filtered.map(x=>x.id)])):prev.filter(id=>!filtered.some(x=>x.id===id)))}/></th><th>Employee</th><th>Employee number</th><th>Role</th></tr></thead><tbody>{filtered.map(e=><tr key={e.id}><td><input aria-label={`Select ${e.firstName} ${e.lastName}`} type="checkbox" checked={selected.includes(e.id)} onChange={ev=>setSelected(prev=>ev.target.checked?[...prev,e.id]:prev.filter(id=>id!==e.id))}/></td><td>{e.firstName} {e.lastName}</td><td>{e.employeeNumber||"—"}</td><td>{e.roleName||"—"}</td></tr>)}</tbody></table>{!filtered.length&&<div className="empty-state">No employees match these filters.</div>}</div><div className="form-actions"><span>{selected.length} employee(s) selected</span><button className="btn btn-primary" disabled={busy||!selected.length} onClick={save}>{busy?"Saving…":"Apply bonus"}</button></div></section>
-    <section className="panel"><div className="panel-header"><h2>Bonus history</h2></div><div className="table-wrap"><table><thead><tr><th>Date</th><th>Employee</th><th>Bonus</th><th>Bonus month</th><th>Updated by</th></tr></thead><tbody>{history.map((h:any)=><tr key={h.id}><td>{h.createdAt?new Date(h.createdAt).toLocaleDateString("en-GB"):"—"}</td><td>{h.employeeName}</td><td>{money(h.bonusPayMinor||0)}</td><td>{new Date(2000,(h.bonusMonth||1)-1,1).toLocaleString("en-GB",{month:"long"})}</td><td>{h.updatedBy||"—"}</td></tr>)}</tbody></table>{!history.length&&<div className="empty-state">No bonus changes recorded yet.</div>}</div></section></>;
+    <section className="panel"><div className="panel-header"><h2>Bonus history</h2></div><div className="table-wrap"><table><thead><tr><th>Date</th><th>Employee</th><th>Bonus</th><th>Bonus month</th><th>Updated by</th></tr></thead><tbody>{history.map((h:any)=><tr key={h.id}><td>{h.createdAt?new Date(h.createdAt).toLocaleDateString("en-GB", { timeZone: appTimeZone }):"—"}</td><td>{h.employeeName}</td><td>{money(h.bonusPayMinor||0)}</td><td>{new Date(2000,(h.bonusMonth||1)-1,1).toLocaleString("en-GB",{month:"long"})}</td><td>{h.updatedBy||"—"}</td></tr>)}</tbody></table>{!history.length&&<div className="empty-state">No bonus changes recorded yet.</div>}</div></section></>;
 }
 
 function NotificationSettingsPage({ onToast }: { onToast: (message: string) => void }) {
@@ -4700,10 +4711,10 @@ function PayrollPage({
       setBusy(false);
     }
   }
-  const fmt = (minor: number, currency = "GBP") =>
+  const fmt = (minor: number, _currency = appCurrency) =>
     new Intl.NumberFormat("en-GB", {
       style: "currency",
-      currency,
+      currency: appCurrency,
       maximumFractionDigits: 2,
     }).format((minor || 0) / 100);
   return (

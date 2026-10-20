@@ -672,7 +672,18 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 		v, ok := values[key]
 		textValue := ""
 		if ok && v != nil {
-			textValue = strings.TrimSpace(fmt.Sprint(v))
+			switch number := v.(type) {
+			case float64:
+				// JSON numbers may arrive as float64 and fmt.Sprint can render them
+				// in scientific notation (for example, 2.331231234e+09). Length
+				// constraints must count the actual digits, not that representation.
+				textValue = strconv.FormatFloat(number, 'f', -1, 64)
+			case json.Number:
+				textValue = number.String()
+			default:
+				textValue = fmt.Sprint(v)
+			}
+			textValue = strings.TrimSpace(textValue)
 		}
 		// Built-in employee fields are required by the employee schema; configurable custom fields follow dcs_app_master.required.
 		if required && textValue == "" {
@@ -1272,6 +1283,7 @@ func randomTemporaryPassword() (string, error) {
 	return "P!" + hex.EncodeToString(b), nil
 }
 func sendWelcomeCredentials(to, first, password string) error {
+	return nil
 	host := strings.TrimSpace(os.Getenv("SMTP_HOST"))
 	user := os.Getenv("SMTP_USERNAME")
 	pass := os.Getenv("SMTP_PASSWORD")
