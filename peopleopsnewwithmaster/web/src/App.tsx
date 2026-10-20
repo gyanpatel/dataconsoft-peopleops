@@ -109,6 +109,11 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (res.status === 204) return undefined as T;
   return res.json();
 }
+const formatShiftTime = (value: unknown) => {
+  const raw = String(value ?? "").trim();
+  const match = raw.match(/^(\d{1,2}:\d{2})(?::\d{2}(?:\.\d+)?)?/);
+  return match ? match[1] : raw;
+};
 const money = (minor: number) =>
   new Intl.NumberFormat("en-GB", {
     style: "currency",
@@ -1326,7 +1331,7 @@ export default function App() {
                           .filter((s) => s.active)
                           .map((s) => (
                             <option key={s.id} value={s.id}>
-                              {s.name} ({s.startTime}–{s.endTime})
+                              {s.name} ({formatShiftTime(s.startTime)}–{formatShiftTime(s.endTime)})
                             </option>
                           ))}
                       </select>
@@ -3021,8 +3026,8 @@ function EmployeeForm({
     location: "London",
     employmentType: "Full-time",
     startDate: new Date().toISOString().slice(0, 10),
+    status: "Inactive",
     employeeNumber: "",
-    salary: 0,
     managerId: "",
   };
   const standard = new Set([
@@ -3035,7 +3040,6 @@ function EmployeeForm({
     "employmentType",
     "startDate",
     "employeeNumber",
-    "salary",
     "roleName",
   ]);
   const [v, setV] = useState<Record<string, any>>({
@@ -3044,7 +3048,6 @@ function EmployeeForm({
     startDate: initial?.startDate
       ? String(initial.startDate).slice(0, 10)
       : defaults.startDate,
-    salary: initial?.salaryMinor != null ? initial.salaryMinor / 100 : 0,
     managerId: (initial as any)?.managerId || "",
     ...(initial?.customFields || {}),
   });
@@ -3142,7 +3145,6 @@ function EmployeeForm({
       dataType: "date",
       required: true,
     },
-    { fieldKey: "salary", label: "Annual salary (GBP)", dataType: "number" },
   ];
   const renderFields = visible.length ? visible : fallback;
   return (
@@ -3193,9 +3195,8 @@ function EmployeeForm({
               typeof v.startDate === "string"
                 ? v.startDate
                 : v.startDate?.slice?.(0, 10),
-            status: v.status || "Active",
+            status: v.status || "Inactive",
             managerId: v.managerId || "",
-            salaryMinor: Math.round(Number(v.salary || 0) * 100),
             roleName: v.roleName,
             customFields,
             photoData,
@@ -3354,20 +3355,24 @@ function EmployeeForm({
         )}
       </div>
       <label>
+        Employment status
+        <select value={v.status || "Inactive"} onChange={(e) => set("status", e.target.value)}>
+          {["Inactive", "Active", "On Leave", "Terminated"].map((status) => <option key={status} value={status}>{status}</option>)}
+        </select>
+        <small className="subcell">New employees remain inactive until required documents are verified.</small>
+      </label>
+      <label>
         Manager <span className="optional">Optional</span>
         <input
           list="employee-manager-options"
-          value={v.managerId || ""}
+          value={(() => { const selected = employees.find((x) => x.id === v.managerId || x.employeeNumber === v.managerId); return selected ? `${selected.employeeNumber} · ${selected.firstName} ${selected.lastName}` : (v.managerId || ""); })()}
           onChange={(e) => {
-            const chosen = employees.find(
-              (x) =>
-                x.id === e.target.value ||
-                `${x.firstName} ${x.lastName} · ${x.employeeNumber}` ===
-                  e.target.value
-            );
-            set("managerId", chosen?.id || e.target.value);
+            const text = e.target.value;
+            const chosen = employees.find((x) => x.id !== initial?.id && (`${x.employeeNumber} · ${x.firstName} ${x.lastName}` === text || x.employeeNumber === text));
+            set("managerId", chosen?.id || text);
           }}
-          placeholder="Search employee by name or employee number"
+          placeholder="Type employee number or name to search"
+          autoComplete="off"
         />
         <datalist id="employee-manager-options">
           {employees
@@ -3375,7 +3380,7 @@ function EmployeeForm({
             .map((e) => (
               <option
                 key={e.id}
-                value={`${e.firstName} ${e.lastName} · ${e.employeeNumber}`}
+                value={`${e.employeeNumber} · ${e.firstName} ${e.lastName}`}
               />
             ))}
         </datalist>
@@ -3503,6 +3508,8 @@ function MasterConfigPage({ onToast }: { onToast: (s: string) => void }) {
     [error, setError] = useState("");
   const pages = [
     ["employees", "Employees"],
+    ["salary-breakup", "Salary breakup"],
+    ["bank-details", "Bank details"],
     ["attendance", "Attendance"],
     ["shift-management", "Shift management"],
     ["leave-management", "Leave management"],
@@ -3540,6 +3547,9 @@ function MasterConfigPage({ onToast }: { onToast: (s: string) => void }) {
     displayOrder: 100,
     options: [],
     helpText: "",
+    fieldMapping: "",
+    minLength: null,
+    maxLength: null,
   };
   async function save() {
     if (!editing) return;
@@ -3743,6 +3753,19 @@ function MasterConfigPage({ onToast }: { onToast: (s: string) => void }) {
                   </select>
                 </label>
                 <label>
+                  Target table.column mapping (optional)
+                  <input value={editing.fieldMapping || ""} onChange={(e) => setEditing({ ...editing, fieldMapping: e.target.value })} placeholder="employees.department or dcs_employee_bank_details.iban" />
+                  <small className="subcell">Leave blank to save the value in employees.custom_fields.</small>
+                </label>
+                <label>
+                  Minimum length
+                  <input type="number" min="0" value={editing.minLength ?? ""} onChange={(e) => setEditing({ ...editing, minLength: e.target.value === "" ? null : Number(e.target.value) })} />
+                </label>
+                <label>
+                  Maximum length
+                  <input type="number" min="0" value={editing.maxLength ?? ""} onChange={(e) => setEditing({ ...editing, maxLength: e.target.value === "" ? null : Number(e.target.value) })} />
+                </label>
+                <label>
                   Display order
                   <input
                     type="number"
@@ -3834,37 +3857,35 @@ function DocumentsPage({
     [issueDate, setIssueDate] = useState(""),
     [expiryDate, setExpiryDate] = useState(""),
     [notes, setNotes] = useState(""),
-    [file, setFile] = useState<File | null>(null),
+    [files, setFiles] = useState<File[]>([]),
     [busy, setBusy] = useState(false);
   const canManage = !!user.permissions?.includes("documents.manage");
   const canUpload = canManage || !!user.employeeId;
   async function upload(e: React.FormEvent) {
     e.preventDefault();
-    if (!file) {
-      onToast("Choose a file first");
+    if (!files.length) {
+      onToast("Choose at least one file first");
       return;
     }
-    const form = new FormData();
-    form.append("file", file);
-    form.append("employeeId", employeeId || user.employeeId || "");
-    form.append("documentType", documentType);
-    form.append("issueDate", issueDate);
-    form.append("expiryDate", expiryDate);
-    form.append("notes", notes);
     setBusy(true);
     try {
-      const res = await fetch("/api/v1/documents", {
-        method: "POST",
-        credentials: "include",
-        body: form,
-      });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        throw new Error(j.error?.message || `Upload failed (${res.status})`);
+      for (const file of files) {
+        const form = new FormData();
+        form.append("file", file);
+        form.append("employeeId", employeeId || user.employeeId || "");
+        form.append("documentType", documentType);
+        form.append("issueDate", issueDate);
+        form.append("expiryDate", expiryDate);
+        form.append("notes", notes);
+        const res = await fetch("/api/v1/documents", { method: "POST", credentials: "include", body: form });
+        if (!res.ok) {
+          const j = await res.json().catch(() => ({}));
+          throw new Error(`${file.name}: ${j.error?.message || `Upload failed (${res.status})`}`);
+        }
       }
-      setFile(null);
+      setFiles([]);
       setNotes("");
-      onToast("Document uploaded to PostgreSQL");
+      onToast(`${files.length} document(s) uploaded to PostgreSQL`);
       await onRefresh();
     } catch (e) {
       onToast(e instanceof Error ? e.message : "Document upload failed");
@@ -3930,6 +3951,9 @@ function DocumentsPage({
                   onChange={(e) => setDocumentType(e.target.value)}
                 >
                   {[
+                    "Passport",
+                    "Emirates ID",
+                    "IBAN letter from bank",
                     "Identity",
                     "Contract",
                     "Right to work",
@@ -3958,13 +3982,17 @@ function DocumentsPage({
                 />
               </label>
               <label>
-                File
+                Files
                 <input
                   type="file"
+                  multiple
                   required
                   accept=".pdf,.png,.jpg,.jpeg,.docx,.xlsx,.txt"
-                  onChange={(e) => setFile(e.target.files?.[0] || null)}
+                  onChange={(e) => setFiles((previous) => [...previous, ...Array.from(e.target.files || [])])}
                 />
+                <button type="button" className="secondary" onClick={() => document.getElementById("document-add-more")?.click()}>Add more</button>
+                <input id="document-add-more" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.docx,.xlsx,.txt" style={{ display: "none" }} onChange={(e) => setFiles((previous) => [...previous, ...Array.from(e.target.files || [])])} />
+                {files.length > 0 && <small className="subcell">{files.length} selected: {files.map((f) => f.name).join(", ")}</small>}
               </label>
               <label>
                 Notes
@@ -3976,7 +4004,7 @@ function DocumentsPage({
               </label>
             </div>
             <div className="modal-actions">
-              <button className="primary" disabled={busy || !file}>
+              <button className="primary" disabled={busy || !files.length}>
                 {busy ? "Uploading…" : "Upload document"} <FileText size={16} />
               </button>
             </div>
@@ -4071,7 +4099,6 @@ function DocumentsPage({
     </>
   );
 }
-
 
 function BonusManagementPage({ onToast }: { onToast: (s: string) => void }) {
   const [employees, setEmployees] = useState<any[]>([]);
@@ -4307,6 +4334,8 @@ function RoleAccessPage({ onToast }: { onToast: (s: string) => void }) {
   const pageList = [
     ["dashboard", "Dashboard"],
     ["employees", "Employees"],
+    ["salary-breakup", "Salary breakup"],
+    ["bank-details", "Bank details"],
     ["employee-hierarchy", "Employee hierarchy"],
     ["attendance", "Attendance"],
     ["shift-management", "Shift management"],

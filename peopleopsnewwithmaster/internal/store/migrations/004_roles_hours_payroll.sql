@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS dsc_employee_salary_breakup (
   variable_pay_minor BIGINT NOT NULL DEFAULT 0 CHECK (variable_pay_minor >= 0),
   allowances_minor BIGINT NOT NULL DEFAULT 0 CHECK (allowances_minor >= 0),
   deductions_minor BIGINT NOT NULL DEFAULT 0 CHECK (deductions_minor >= 0),
-  currency CHAR(3) NOT NULL DEFAULT 'GBP',
+  currency CHAR(3) NOT NULL DEFAULT 'AED',
   effective_from DATE NOT NULL DEFAULT CURRENT_DATE,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS dcs_payments (
   entry_type TEXT NOT NULL CHECK(entry_type IN ('debit','credit')),
   status TEXT NOT NULL DEFAULT 'Pending' CHECK(status IN ('Pending','Cleared','Failed','Reversed')),
   amount_minor BIGINT NOT NULL CHECK(amount_minor >= 0),
-  currency CHAR(3) NOT NULL DEFAULT 'GBP',
+  currency CHAR(3) NOT NULL DEFAULT 'AED',
   reference TEXT NOT NULL DEFAULT '',
   created_by TEXT REFERENCES users(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS dcs_salary_summary (
   employee_id TEXT NOT NULL REFERENCES employees(id),
   period_start DATE NOT NULL,
   period_end DATE NOT NULL,
-  currency CHAR(3) NOT NULL DEFAULT 'GBP',
+  currency CHAR(3) NOT NULL DEFAULT 'AED',
   normal_hours NUMERIC(10,2) NOT NULL DEFAULT 0,
   overtime_hours NUMERIC(10,2) NOT NULL DEFAULT 0,
   base_pay_minor BIGINT NOT NULL DEFAULT 0,
@@ -137,7 +137,7 @@ ON CONFLICT(step_order) DO NOTHING;
 
 -- Bootstrap salary breakups for employees already in the directory. Annual salary is converted
 -- to an indicative hourly rate using 2,080 standard hours/year; HR/Accounts should verify it.
-INSERT INTO dsc_employee_salary_breakup(id,employee_id,gross_pay_minor,hourly_rate_minor,overtime_multiplier,currency,effective_from)
-SELECT 'salary-' || e.id,e.id,e.salary_minor,GREATEST(0,ROUND(e.salary_minor::numeric/2080)::bigint),1.5,COALESCE(e.currency,'GBP'),CURRENT_DATE
+INSERT INTO dsc_employee_salary_breakup(id,employee_id,overtime_multiplier,currency,effective_from)
+SELECT 'salary-' || e.id,e.id,1.5,'AED',CURRENT_DATE
 FROM employees e
 ON CONFLICT(employee_id) DO NOTHING;

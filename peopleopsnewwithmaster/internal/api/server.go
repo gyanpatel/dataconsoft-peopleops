@@ -401,7 +401,7 @@ func (s *Server) employees(w http.ResponseWriter, r *http.Request) {
 	if v, e := strconv.Atoi(r.URL.Query().Get("limit")); e == nil && v > 0 && v <= 200 {
 		limit = v
 	}
-	rows, e := s.Store.DB.Query(s.Store.Ctx, `SELECT id,employee_number,first_name,last_name,email,department,job_title,location,employment_type,status,start_date,salary_minor,currency,custom_fields,COALESCE(photo_document_id, ''),COALESCE(manager_id,''),COALESCE((SELECT first_name||' '||last_name FROM employees m WHERE m.id=employees.manager_id),''),COALESCE((SELECT u.role FROM users u WHERE u.employee_id=employees.id AND u.active=true ORDER BY u.id LIMIT 1),'') FROM employees WHERE ($1='' OR first_name LIKE $2 OR last_name LIKE $3 OR email LIKE $4 OR employee_number LIKE $5 OR department LIKE $6) ORDER BY last_name,first_name LIMIT $7`, q, like, like, like, like, like, limit)
+	rows, e := s.Store.DB.Query(s.Store.Ctx, `SELECT id,employee_number,first_name,last_name,email,department,job_title,location,employment_type,status,start_date,custom_fields,COALESCE(photo_document_id, ''),COALESCE(manager_id,''),COALESCE((SELECT first_name||' '||last_name FROM employees m WHERE m.id=employees.manager_id),''),COALESCE((SELECT u.role FROM users u WHERE u.employee_id=employees.id AND u.active=true ORDER BY u.id LIMIT 1),'') FROM employees WHERE ($1='' OR first_name LIKE $2 OR last_name LIKE $3 OR email LIKE $4 OR employee_number LIKE $5 OR department LIKE $6) ORDER BY last_name,first_name LIMIT $7`, q, like, like, like, like, like, limit)
 	if e != nil {
 		writeError(w, 500, "database_error", "Could not load employees")
 		return
@@ -412,7 +412,7 @@ func (s *Server) employees(w http.ResponseWriter, r *http.Request) {
 		var x Employee
 		var sDate sql.NullTime
 		var customJSON []byte
-		if e = rows.Scan(&x.ID, &x.Number, &x.First, &x.Last, &x.Email, &x.Department, &x.Title, &x.Location, &x.Type, &x.Status, &sDate, &x.SalaryMinor, &x.Currency, &customJSON, &x.PhotoID, &x.ManagerID, &x.ManagerName, &x.RoleName); e != nil {
+		if e = rows.Scan(&x.ID, &x.Number, &x.First, &x.Last, &x.Email, &x.Department, &x.Title, &x.Location, &x.Type, &x.Status, &sDate, &customJSON, &x.PhotoID, &x.ManagerID, &x.ManagerName, &x.RoleName); e != nil {
 			log.Println("[ERROR]", e)
 			writeError(w, 500, "database_error", "Could not read employees")
 			return
@@ -455,7 +455,7 @@ func (s *Server) updateEmployee(w http.ResponseWriter, r *http.Request) {
 		ManagerID    string         `json:"managerId"`
 		RoleName     string         `json:"roleName"`
 	}
-	if decode(r, &in) != nil || strings.TrimSpace(in.First) == "" || strings.TrimSpace(in.Last) == "" || !strings.Contains(in.Email, "@") || in.Department == "" || in.Title == "" || in.SalaryMinor < 0 {
+	if decode(r, &in) != nil || strings.TrimSpace(in.First) == "" || strings.TrimSpace(in.Last) == "" || !strings.Contains(in.Email, "@") || in.Department == "" || in.Title == "" {
 		writeError(w, 400, "validation_error", "Complete the required fields with valid values")
 		return
 	}
@@ -481,7 +481,11 @@ func (s *Server) updateEmployee(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.Status == "" {
-		in.Status = "Active"
+		in.Status = "Inactive"
+	}
+	if in.Status != "Active" && in.Status != "Inactive" && in.Status != "On Leave" && in.Status != "Terminated" {
+		writeError(w, 400, "validation_error", "Status must be Active, Inactive, On Leave or Terminated")
+		return
 	}
 	if in.Number == "" {
 		writeError(w, 400, "validation_error", "Employee number is required")
@@ -494,12 +498,12 @@ func (s *Server) updateEmployee(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	tag, err := tx.Exec(r.Context(), `UPDATE employees SET employee_number=$2,first_name=$3,last_name=$4,email=$5,department=$6,job_title=$7,location=$8,employment_type=$9,status=$10,start_date=$11,salary_minor=$12,custom_fields=$13::jsonb,updated_at=$14 WHERE id=$1`, id, in.Number, strings.TrimSpace(in.First), strings.TrimSpace(in.Last), strings.ToLower(strings.TrimSpace(in.Email)), in.Department, in.Title, in.Location, in.Type, in.Status, start, in.SalaryMinor, string(custom), time.Now().UTC())
+	tag, err := tx.Exec(r.Context(), `UPDATE employees SET employee_number=$2,first_name=$3,last_name=$4,email=$5,department=$6,job_title=$7,location=$8,employment_type=$9,status=$10,start_date=$11,custom_fields=$12::jsonb,manager_id=$13,updated_at=$14 WHERE id=$1`, id, in.Number, strings.TrimSpace(in.First), strings.TrimSpace(in.Last), strings.ToLower(strings.TrimSpace(in.Email)), in.Department, in.Title, in.Location, in.Type, in.Status, start, string(custom), nullableEmployeeManager(in.ManagerID), time.Now().UTC())
 	if err != nil || tag.RowsAffected() == 0 {
 		writeError(w, 409, "update_failed", "Could not update employee; check the employee exists and the email/number is unique")
 		return
 	}
-	userTag, roleErr := tx.Exec(r.Context(), `UPDATE users SET role=$2,email=$3,display_name=$4 WHERE employee_id=$1 AND active=true`, id, in.RoleName, strings.ToLower(strings.TrimSpace(in.Email)), strings.TrimSpace(in.First)+" "+strings.TrimSpace(in.Last))
+	userTag, roleErr := tx.Exec(r.Context(), `UPDATE users SET role=$2,email=$3,display_name=$4,active=($5='Active') WHERE employee_id=$1`, id, in.RoleName, strings.ToLower(strings.TrimSpace(in.Email)), strings.TrimSpace(in.First)+" "+strings.TrimSpace(in.Last), in.Status)
 	if roleErr != nil {
 		log.Println("employee update: linked login role update failed:", roleErr)
 		writeError(w, 500, "database_error", "Could not update the employee login role")
@@ -549,6 +553,15 @@ func (s *Server) updateEmployee(w http.ResponseWriter, r *http.Request) {
 	s.Store.Audit(r.Context(), u.ID, "employee.updated", "employee", id, fmt.Sprintf("Updated employee %s %s", in.First, in.Last), requestID(r))
 	writeJSON(w, 200, map[string]any{"id": id, "message": "Employee updated"})
 }
+
+func nullableEmployeeManager(id string) any {
+	id = strings.TrimSpace(id)
+	if id == "" || strings.EqualFold(id, "null") || strings.EqualFold(id, "undefined") {
+		return nil
+	}
+	return id
+}
+
 func (s *Server) employeePhoto(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var mime string
@@ -593,9 +606,9 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_request", "Could not read employee form data: "+err.Error())
 		return
 	}
-	if len(strings.TrimSpace(in.First)) < 1 || len(strings.TrimSpace(in.First)) > 80 || len(strings.TrimSpace(in.Last)) < 1 || len(strings.TrimSpace(in.Last)) > 80 || !strings.Contains(strings.TrimSpace(in.Email), "@") || len(in.Email) > 254 || len(strings.TrimSpace(in.Department)) < 1 || len(strings.TrimSpace(in.Title)) < 1 || in.SalaryMinor < 0 {
+	if len(strings.TrimSpace(in.First)) < 1 || len(strings.TrimSpace(in.First)) > 80 || len(strings.TrimSpace(in.Last)) < 1 || len(strings.TrimSpace(in.Last)) > 80 || !strings.Contains(strings.TrimSpace(in.Email), "@") || len(in.Email) > 254 || len(strings.TrimSpace(in.Department)) < 1 || len(strings.TrimSpace(in.Title)) < 1 {
 		log.Printf("employee create: validation failed: firstName=%q lastName=%q email=%q department=%q jobTitle=%q salaryMinor=%d", in.First, in.Last, in.Email, in.Department, in.Title, in.SalaryMinor)
-		writeError(w, 400, "validation_error", "Complete the required fields with valid values: first name, last name, email, department, job title and a non-negative salary")
+		writeError(w, 400, "validation_error", "Complete the required fields with valid values: first name, last name, email, department, job title")
 		return
 	}
 	// Validate the requested login role against the active database role catalogue.
@@ -630,7 +643,7 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Required fields configured by Master Admin are enforced server-side as well as in the UI.
-	configRows, configErr := s.Store.DB.Query(r.Context(), `SELECT field_key,label FROM dcs_app_master WHERE page_id='employees' AND visible=true AND required=true`)
+	configRows, configErr := s.Store.DB.Query(r.Context(), `SELECT field_key,label,required,min_length,max_length FROM dcs_app_master WHERE page_id='employees' AND visible=true`)
 	if configErr != nil {
 		writeError(w, 500, "database_error", "Could not validate employee configuration")
 		return
@@ -641,15 +654,32 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 	}
 	for configRows.Next() {
 		var key, label string
-		if configRows.Scan(&key, &label) != nil {
+		var required bool
+		var minLen, maxLen sql.NullInt32
+		if configRows.Scan(&key, &label, &required, &minLen, &maxLen) != nil {
 			configRows.Close()
 			writeError(w, 500, "database_error", "Could not validate employee configuration")
 			return
 		}
 		v, ok := values[key]
-		if !ok || v == nil || strings.TrimSpace(fmt.Sprint(v)) == "" {
+		textValue := ""
+		if ok && v != nil {
+			textValue = strings.TrimSpace(fmt.Sprint(v))
+		}
+		// Built-in employee fields are required by the employee schema; configurable custom fields follow dcs_app_master.required.
+		if required && textValue == "" {
 			configRows.Close()
 			writeError(w, 400, "required_field", "Required field is missing: "+label)
+			return
+		}
+		if minLen.Valid && len([]rune(textValue)) < int(minLen.Int32) {
+			configRows.Close()
+			writeError(w, 400, "validation_error", label+" is shorter than the minimum length")
+			return
+		}
+		if maxLen.Valid && len([]rune(textValue)) > int(maxLen.Int32) {
+			configRows.Close()
+			writeError(w, 400, "validation_error", label+" exceeds the maximum length")
 			return
 		}
 	}
@@ -674,7 +704,7 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	id := auth.NewID()
 	customJSON, _ := json.Marshal(in.CustomFields)
-	_, e := s.Store.DB.Exec(r.Context(), `INSERT INTO employees(id,employee_number,first_name,last_name,email,department,job_title,location,employment_type,status,start_date,salary_minor,currency,custom_fields,manager_id,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'Active',$10,$11,'GBP',$12::jsonb,$13,$14,$15)`, id, in.Number, strings.TrimSpace(in.First), strings.TrimSpace(in.Last), strings.ToLower(strings.TrimSpace(in.Email)), strings.TrimSpace(in.Department), strings.TrimSpace(in.Title), in.Location, in.Type, startDate, in.SalaryMinor, string(customJSON), managerArg, now, now)
+	_, e := s.Store.DB.Exec(r.Context(), `INSERT INTO employees(id,employee_number,first_name,last_name,email,department,job_title,location,employment_type,status,start_date,custom_fields,manager_id,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'Inactive',$10,$11::jsonb,$12,$13,$14)`, id, in.Number, strings.TrimSpace(in.First), strings.TrimSpace(in.Last), strings.ToLower(strings.TrimSpace(in.Email)), strings.TrimSpace(in.Department), strings.TrimSpace(in.Title), in.Location, in.Type, startDate, string(customJSON), managerArg, now, now)
 	if e != nil {
 		log.Println("employee create: insert failed:", e)
 		if strings.Contains(strings.ToLower(e.Error()), "unique") {
@@ -698,7 +728,7 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := "user-" + id
-	_, userErr := s.Store.DB.Exec(r.Context(), `INSERT INTO users(id,email,password_hash,display_name,role,employee_id,active,must_change_password) VALUES($1,$2,$3,$4,$5,$6,TRUE,TRUE)`, userID, strings.ToLower(strings.TrimSpace(in.Email)), passwordHash, strings.TrimSpace(in.First)+" "+strings.TrimSpace(in.Last), in.RoleName, id)
+	_, userErr := s.Store.DB.Exec(r.Context(), `INSERT INTO users(id,email,password_hash,display_name,role,employee_id,active,must_change_password) VALUES($1,$2,$3,$4,$5,$6,FALSE,TRUE)`, userID, strings.ToLower(strings.TrimSpace(in.Email)), passwordHash, strings.TrimSpace(in.First)+" "+strings.TrimSpace(in.Last), in.RoleName, id)
 	if userErr != nil {
 		log.Println("employee create: linked user insert failed:", userErr)
 		_, _ = s.Store.DB.Exec(r.Context(), `DELETE FROM employees WHERE id=$1`, id)
@@ -719,8 +749,15 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 	) ON CONFLICT (employee_id) DO NOTHING`
 
 	if _, salaryErr := s.Store.DB.Exec(r.Context(), query, "salary-"+id, id, in.SalaryMinor, startDate); salaryErr != nil {
-		// Handle the error here
-		writeError(w, 502, "welcome_email_failed", "Employee account was not created because the welcome email could not be sent. Check SMTP configuration and try again.")
+		log.Printf("employee create: employee %s was created, but salary setup failed: %v", id, salaryErr)
+		// The employee and linked user already exist. Return one response and make
+		// the partial setup visible rather than falsely reporting an email failure.
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"id":      id,
+			"message": "Employee created, but salary setup requires attention",
+			"warning": "Salary details could not be saved. Please contact an administrator.",
+		})
+		return
 	}
 	if contractErr := s.createEmploymentContract(id); contractErr != nil {
 		log.Println("employee create: contract draft/signature email workflow could not complete:", contractErr)

@@ -44,7 +44,7 @@ func Open() (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, migration := range []string{"migrations/001_init.sql", "migrations/002_app_master_documents.sql", "migrations/003_employee_profiles.sql", "migrations/004_roles_hours_payroll.sql", "migrations/005_employee_hierarchy_password.sql", "migrations/006_role_permissions.sql", "migrations/007_actual_hours_approval.sql", "migrations/008_document_types_and_signing.sql", "migrations/009_document_signing_audit.sql", "migrations/009_leave_balance.sql", "migrations/010_salary_shift_attendance.sql", "migrations/010_bonus_management.sql", "migrations/011_execute_monthly_salary_algorithm.sql"} {
+	for _, migration := range []string{} { //s"migrations/001_init.sql", "migrations/002_app_master_documents.sql", "migrations/003_employee_profiles.sql", "migrations/004_roles_hours_payroll.sql", "migrations/005_employee_hierarchy_password.sql", "migrations/006_role_permissions.sql", "migrations/007_actual_hours_approval.sql", "migrations/008_document_types_and_signing.sql", "migrations/009_document_signing_audit.sql", "migrations/009_leave_balance.sql", "migrations/010_salary_shift_attendance.sql", "migrations/010_bonus_management.sql", "migrations/011_execute_monthly_salary_algorithm.sql", "migrations/013_bonus_management.sql", "migrations/014_app_master_target_mappings.sql"} {
 		b, readErr := migrationFiles.ReadFile(migration)
 		if readErr != nil {
 			db.Close()

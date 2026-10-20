@@ -1,6 +1,7 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,7 +24,7 @@ func (s *Server) appMaster(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		page := strings.TrimSpace(r.URL.Query().Get("page"))
-		rows, err := s.Store.DB.Query(r.Context(), `SELECT id,page_id,page_name,page_item,field_key,label,data_type,required,visible,display_order,options,config,help_text FROM dcs_app_master WHERE ($1='' OR page_id=$1) ORDER BY page_id,display_order,id`, page)
+		rows, err := s.Store.DB.Query(r.Context(), `SELECT id,page_id,page_name,page_item,field_key,label,data_type,required,visible,display_order,options,config,help_text,COALESCE(field_mapping,''),min_length,max_length FROM dcs_app_master WHERE ($1='' OR page_id=$1) ORDER BY page_id,display_order,id`, page)
 		if err != nil {
 			writeError(w, 500, "database_error", "Could not load application configuration")
 			return
@@ -36,7 +37,9 @@ func (s *Server) appMaster(w http.ResponseWriter, r *http.Request) {
 			var required, visible bool
 			var order int
 			var opts, cfg []byte
-			if err := rows.Scan(&id, &pageID, &pageName, &item, &key, &label, &typ, &required, &visible, &order, &opts, &cfg, &help); err != nil {
+			var fieldMapping string
+			var minLength, maxLength sql.NullInt32
+			if err := rows.Scan(&id, &pageID, &pageName, &item, &key, &label, &typ, &required, &visible, &order, &opts, &cfg, &help, &fieldMapping, &minLength, &maxLength); err != nil {
 				writeError(w, 500, "database_error", "Could not read application configuration")
 				return
 			}
@@ -44,7 +47,7 @@ func (s *Server) appMaster(w http.ResponseWriter, r *http.Request) {
 			var config any = map[string]any{}
 			_ = json.Unmarshal(opts, &options)
 			_ = json.Unmarshal(cfg, &config)
-			items = append(items, map[string]any{"id": id, "pageId": pageID, "pageName": pageName, "pageItem": item, "fieldKey": key, "label": label, "dataType": typ, "required": required, "visible": visible, "displayOrder": order, "options": options, "config": config, "helpText": help})
+			items = append(items, map[string]any{"id": id, "pageId": pageID, "pageName": pageName, "pageItem": item, "fieldKey": key, "label": label, "dataType": typ, "required": required, "visible": visible, "displayOrder": order, "options": options, "config": config, "helpText": help, "fieldMapping": fieldMapping, "minLength": nullableInt(minLength), "maxLength": nullableInt(maxLength)})
 		}
 		writeJSON(w, 200, map[string]any{"items": items, "count": len(items)})
 	case http.MethodPost:
@@ -61,6 +64,9 @@ func (s *Server) appMaster(w http.ResponseWriter, r *http.Request) {
 			Options      []string       `json:"options"`
 			Config       map[string]any `json:"config"`
 			HelpText     string         `json:"helpText"`
+			FieldMapping string         `json:"fieldMapping"`
+			MinLength    *int           `json:"minLength"`
+			MaxLength    *int           `json:"maxLength"`
 		}
 		if decode(r, &in) != nil || !validConfig(in.PageID, in.PageName, in.FieldKey, in.Label, in.DataType) {
 			writeError(w, 400, "validation_error", "Provide valid page, field key, label and supported data type")
@@ -69,7 +75,7 @@ func (s *Server) appMaster(w http.ResponseWriter, r *http.Request) {
 		opts, _ := json.Marshal(in.Options)
 		cfg, _ := json.Marshal(in.Config)
 		id := int64(0)
-		err := s.Store.DB.QueryRow(r.Context(), `INSERT INTO dcs_app_master(page_id,page_name,page_item,field_key,label,data_type,required,visible,display_order,options,config,help_text) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12) RETURNING id`, in.PageID, in.PageName, in.PageItem, in.FieldKey, in.Label, in.DataType, in.Required, in.Visible, in.DisplayOrder, opts, cfg, in.HelpText).Scan(&id)
+		err := s.Store.DB.QueryRow(r.Context(), `INSERT INTO dcs_app_master(page_id,page_name,page_item,field_key,label,data_type,required,visible,display_order,options,config,help_text,field_mapping,min_length,max_length) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13,$14,$15) RETURNING id`, in.PageID, in.PageName, in.PageItem, in.FieldKey, in.Label, in.DataType, in.Required, in.Visible, in.DisplayOrder, opts, cfg, in.HelpText, strings.TrimSpace(in.FieldMapping), in.MinLength, in.MaxLength).Scan(&id)
 		if err != nil {
 			writeError(w, 409, "conflict", "A field with this key already exists for the page")
 			return
@@ -91,6 +97,9 @@ func (s *Server) appMaster(w http.ResponseWriter, r *http.Request) {
 			Options      []string       `json:"options"`
 			Config       map[string]any `json:"config"`
 			HelpText     string         `json:"helpText"`
+			FieldMapping string         `json:"fieldMapping"`
+			MinLength    *int           `json:"minLength"`
+			MaxLength    *int           `json:"maxLength"`
 		}
 		if decode(r, &in) != nil || in.ID < 1 || !validConfig(in.PageID, in.PageName, in.FieldKey, in.Label, in.DataType) {
 			writeError(w, 400, "validation_error", "Invalid application configuration")
@@ -98,7 +107,7 @@ func (s *Server) appMaster(w http.ResponseWriter, r *http.Request) {
 		}
 		opts, _ := json.Marshal(in.Options)
 		cfg, _ := json.Marshal(in.Config)
-		tag, err := s.Store.DB.Exec(r.Context(), `UPDATE dcs_app_master SET page_id=$2,page_name=$3,page_item=$4,field_key=$5,label=$6,data_type=$7,required=$8,visible=$9,display_order=$10,options=$11::jsonb,config=$12::jsonb,help_text=$13,updated_at=NOW() WHERE id=$1`, in.ID, in.PageID, in.PageName, in.PageItem, in.FieldKey, in.Label, in.DataType, in.Required, in.Visible, in.DisplayOrder, opts, cfg, in.HelpText)
+		tag, err := s.Store.DB.Exec(r.Context(), `UPDATE dcs_app_master SET page_id=$2,page_name=$3,page_item=$4,field_key=$5,label=$6,data_type=$7,required=$8,visible=$9,display_order=$10,options=$11::jsonb,config=$12::jsonb,help_text=$13,field_mapping=$14,min_length=$15,max_length=$16,updated_at=NOW() WHERE id=$1`, in.ID, in.PageID, in.PageName, in.PageItem, in.FieldKey, in.Label, in.DataType, in.Required, in.Visible, in.DisplayOrder, opts, cfg, in.HelpText, strings.TrimSpace(in.FieldMapping), in.MinLength, in.MaxLength)
 		if err != nil {
 			writeError(w, 409, "conflict", "Could not update configuration; check for duplicate field keys")
 			return
@@ -130,6 +139,13 @@ func (s *Server) appMaster(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 405, "method_not_allowed", "Method not allowed")
 	}
 }
+func nullableInt(v sql.NullInt32) any {
+	if !v.Valid {
+		return nil
+	}
+	return v.Int32
+}
+
 func validConfig(pageID, pageName, key, label, typ string) bool {
 	if len(pageID) < 2 || len(pageID) > 80 || len(pageName) < 2 || len(pageName) > 100 || len(key) < 2 || len(key) > 80 || len(label) < 1 || len(label) > 120 {
 		return false

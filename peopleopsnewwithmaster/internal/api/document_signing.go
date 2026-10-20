@@ -56,7 +56,7 @@ func signingToken() (string, string, error) {
 func (s *Server) createEmploymentContract(employeeID string) error {
 	var first, last, email, employeeNumber, department, title, location, start, currency string
 	var gross int64
-	err := s.Store.DB.QueryRow(s.Store.Ctx, `SELECT e.first_name,e.last_name,e.email,COALESCE(e.employee_number,''),COALESCE(e.department,''),COALESCE(e.job_title,''),COALESCE(e.location,''),e.start_date::text,COALESCE(b.gross_pay_minor,e.salary_minor),COALESCE(b.currency,e.currency,'GBP') FROM employees e LEFT JOIN dsc_employee_salary_breakup b ON b.employee_id=e.id WHERE e.id=$1`, employeeID).Scan(&first, &last, &email, &employeeNumber, &department, &title, &location, &start, &gross, &currency)
+	err := s.Store.DB.QueryRow(s.Store.Ctx, `SELECT e.first_name,e.last_name,e.email,COALESCE(e.employee_number,''),COALESCE(e.department,''),COALESCE(e.job_title,''),COALESCE(e.location,''),e.start_date::text,COALESCE(b.gross_pay_minor,0),COALESCE((SELECT currency_code FROM dcs_app_currency WHERE is_default=TRUE LIMIT 1),'GBP') FROM employees e LEFT JOIN dsc_employee_salary_breakup b ON b.employee_id=e.id WHERE e.id=$1`, employeeID).Scan(&first, &last, &email, &employeeNumber, &department, &title, &location, &start, &gross, &currency)
 	if err != nil {
 		return err
 	}
@@ -200,7 +200,7 @@ func sendSigningRequest(to, first, token string) error {
 		origin = strings.TrimRight(strings.TrimSpace(os.Getenv("APP_ORIGIN")), "/")
 	}
 	if origin == "" {
-		origin = "http://api-backend.dataconsoft.com:8080"
+		origin = "http://localhost:8080"
 	}
 	link := origin + "/api/v1/sign/" + token
 	body := "To: " + to + "\r\nSubject: Employment document ready for signature\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nHello " + first + ",\r\n\r\nAn employment document is ready for your review and electronic signature: " + link + "\r\n\r\nPlease review the document carefully. Contact HR if the terms are incomplete or incorrect.\r\n"
