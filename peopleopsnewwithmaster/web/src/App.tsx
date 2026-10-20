@@ -3442,10 +3442,11 @@ function LeaveForm({
     endDate: "",
     days: 1,
     reason: "",
-    employeeId: "",
+    // Explicit sentinel: the API resolves "self" from the authenticated session.
+    // Never infer self-vs-other from an empty employee selection.
+    employeeId: "self",
   });
   const [employeeSearch, setEmployeeSearch] = useState("");
-  const [leaveFor, setLeaveFor] = useState<"self" | "other">("self");
   const [busy, setBusy] = useState(false);
   const employeeMatches = employees.filter((e) => `${e.firstName} ${e.lastName} ${e.employeeNumber} ${e.email}`.toLowerCase().includes(employeeSearch.toLowerCase())).slice(0, 8);
   return (
@@ -3461,16 +3462,39 @@ function LeaveForm({
         }
       }}
     >
-      {canBookForOthers && <label>Apply leave for
-        <select value={leaveFor} onChange={(e) => { const next = e.target.value as "self" | "other"; setLeaveFor(next); setV({ ...v, employeeId: next === "self" ? "self" : "" }); setEmployeeSearch(""); }}>
+      {canBookForOthers && <section className="leave-applicant-picker">
+        <label htmlFor="leave-applicant-mode">Apply leave for</label>
+        <select
+          id="leave-applicant-mode"
+          value={v.employeeId === "self" ? "self" : "other"}
+          onChange={(e) => {
+            if (e.target.value === "self") {
+              setV((current) => ({ ...current, employeeId: "self" }));
+              setEmployeeSearch("");
+            } else {
+              setV((current) => ({ ...current, employeeId: "" }));
+              setEmployeeSearch("");
+            }
+          }}
+        >
           <option value="self">Myself</option>
           <option value="other">Another employee</option>
         </select>
-      </label>}
-      {canBookForOthers && leaveFor === "other" && <label>Employee (search by name or employee number) *
-        <input value={employeeSearch} onChange={(e) => { setEmployeeSearch(e.target.value); setV({ ...v, employeeId: "" }); }} placeholder="Start typing an employee…" autoComplete="off" required={!v.employeeId} />
-        {employeeSearch && !v.employeeId && <div className="soft-search-results">{employeeMatches.map((employee) => <button type="button" className="review-btn" key={employee.id} onClick={() => { setV({ ...v, employeeId: employee.id }); setEmployeeSearch(`${employee.firstName} ${employee.lastName} (${employee.employeeNumber})`); }}>{employee.firstName} · {employee.lastName} · {employee.employeeNumber}</button>)}{!employeeMatches.length && <small>No matching employees</small>}</div>}
-      </label>}
+        {v.employeeId !== "self" && <label>Find employee *
+          <input
+            value={employeeSearch}
+            onChange={(e) => {
+              setEmployeeSearch(e.target.value);
+              setV((current) => ({ ...current, employeeId: "" }));
+            }}
+            placeholder="Search name, employee number or email…"
+            autoComplete="off"
+            required
+          />
+          {employeeSearch && !v.employeeId && <div className="soft-search-results">{employeeMatches.map((employee) => <button type="button" className="review-btn" key={employee.id} onClick={() => { setV((current) => ({ ...current, employeeId: employee.id })); setEmployeeSearch(`${employee.firstName} ${employee.lastName} (${employee.employeeNumber})`); }}>{employee.firstName} {employee.lastName} · {employee.employeeNumber}</button>)}{!employeeMatches.length && <small>No matching employees</small>}</div>}
+          {v.employeeId && <small className="subcell">Selected employee: {employeeSearch}</small>}
+        </label>}
+      </section>}
       <label>
         Leave type
         <select
@@ -3890,250 +3914,93 @@ function DocumentsPage({
   onRefresh: () => Promise<void>;
   onToast: (s: string) => void;
 }) {
+  type UploadRow = { key: string; file: File | null; documentType: string; issueDate: string; expiryDate: string; notes: string };
   const [employeeId, setEmployeeId] = useState(user.employeeId || ""),
-    [documentType, setDocumentType] = useState("Identity"),
-    [issueDate, setIssueDate] = useState(""),
-    [expiryDate, setExpiryDate] = useState(""),
-    [notes, setNotes] = useState(""),
-    [files, setFiles] = useState<File[]>([]),
+    [documentTypes, setDocumentTypes] = useState<string[]>([]),
+    [rows, setRows] = useState<UploadRow[]>([{ key: crypto.randomUUID(), file: null, documentType: "", issueDate: "", expiryDate: "", notes: "" }]),
     [busy, setBusy] = useState(false);
   const canManage = !!user.permissions?.includes("documents.manage");
   const canUpload = canManage || !!user.employeeId;
+  useEffect(() => {
+    let alive = true;
+    request<{ items: string[] }>("/document-types").then((result) => {
+      if (!alive) return;
+      const types = result.items || [];
+      setDocumentTypes(types);
+      setRows((current) => current.map((row) => ({ ...row, documentType: row.documentType || types[0] || "" })));
+    }).catch((error) => onToast(error instanceof Error ? error.message : "Could not load document types"));
+    return () => { alive = false; };
+  }, []);
+  function updateRow(key: string, patch: Partial<UploadRow>) {
+    setRows((current) => current.map((row) => row.key === key ? { ...row, ...patch } : row));
+  }
+  function addRow() {
+    setRows((current) => [...current, { key: crypto.randomUUID(), file: null, documentType: documentTypes[0] || "", issueDate: "", expiryDate: "", notes: "" }]);
+  }
+  function removeRow(key: string) {
+    setRows((current) => current.length <= 1 ? current : current.filter((row) => row.key !== key));
+  }
   async function upload(e: React.FormEvent) {
     e.preventDefault();
-    if (!files.length) {
-      onToast("Choose at least one file first");
-      return;
-    }
+    const incomplete = rows.find((row) => !row.file || !row.documentType);
+    if (incomplete) { onToast("Choose a file and document type for every document row"); return; }
+    if (rows.some((row) => row.issueDate && row.expiryDate && row.expiryDate < row.issueDate)) { onToast("Expiry date cannot be earlier than issue date"); return; }
     setBusy(true);
+    let uploaded = 0;
     try {
-      for (const file of files) {
+      for (const row of rows) {
         const form = new FormData();
-        form.append("file", file);
+        form.append("file", row.file as File);
         form.append("employeeId", employeeId || user.employeeId || "");
-        form.append("documentType", documentType);
-        form.append("issueDate", issueDate);
-        form.append("expiryDate", expiryDate);
-        form.append("notes", notes);
+        form.append("documentType", row.documentType);
+        form.append("issueDate", row.issueDate);
+        form.append("expiryDate", row.expiryDate);
+        form.append("notes", row.notes);
         const res = await fetch("/api/v1/documents", { method: "POST", credentials: "include", body: form });
         if (!res.ok) {
           const j = await res.json().catch(() => ({}));
-          throw new Error(`${file.name}: ${j.error?.message || `Upload failed (${res.status})`}`);
+          throw new Error(`${row.file?.name}: ${j.error?.message || `Upload failed (${res.status})`}. ${uploaded} of ${rows.length} uploaded.`);
         }
+        uploaded++;
       }
-      setFiles([]);
-      setNotes("");
-      onToast(`${files.length} document(s) uploaded to PostgreSQL`);
+      setRows([{ key: crypto.randomUUID(), file: null, documentType: documentTypes[0] || "", issueDate: "", expiryDate: "", notes: "" }]);
+      onToast(`${uploaded} document(s) uploaded successfully`);
       await onRefresh();
     } catch (e) {
-      onToast(e instanceof Error ? e.message : "Document upload failed");
-    } finally {
-      setBusy(false);
-    }
+      if (uploaded) await onRefresh();
+      onToast(e instanceof Error ? e.message : `Document upload failed. ${uploaded} of ${rows.length} uploaded.`);
+    } finally { setBusy(false); }
   }
   async function verify(id: string, status: string) {
     try {
-      await request(`/documents/${id}/decision`, {
-        method: "POST",
-        body: JSON.stringify({ status }),
-      });
-      onToast(`Document marked ${status.toLowerCase()}`);
+      await request(`/documents/${id}/decision`, { method: "POST", body: JSON.stringify({ status }) });
+      onToast(status === "Verified" ? "Document verified. Employee activates when all checklist documents are verified." : `Document marked ${status.toLowerCase()}`);
       await onRefresh();
-    } catch (e) {
-      onToast(e instanceof Error ? e.message : "Could not update status");
-    }
+    } catch (e) { onToast(e instanceof Error ? e.message : "Could not update status"); }
   }
   return (
     <>
-      <div className="page-heading">
-        <div>
-          <div className="eyebrow green-eyebrow">DOCUMENT VAULT</div>
-          <h1>Documents</h1>
-          <p>
-            Upload, review and securely download employee documents. Files are
-            stored in PostgreSQL BYTEA.
-          </p>
-        </div>
-        <span className="count-pill">{documents.length} documents</span>
-      </div>
-      {canUpload && (
-        <section className="panel directory-panel">
-          <div className="panel-heading">
-            <div>
-              <h3>Upload document</h3>
-              <p>PDF, PNG, JPG, DOCX, XLSX or TXT · Maximum 15 MB.</p>
-            </div>
+      <div className="page-heading"><div><div className="eyebrow green-eyebrow">DOCUMENT VAULT</div><h1>Documents</h1><p>Upload and verify employee documents. Each document has its own type, dates and notes.</p></div><span className="count-pill">{documents.length} documents</span></div>
+      {canUpload && <section className="panel directory-panel">
+        <div className="panel-heading"><div><h3>Upload documents</h3><p>PDF, PNG, JPG, DOCX, XLSX or TXT · Maximum 15 MB per file.</p></div><button type="button" className="secondary" onClick={addRow}>+ Add document</button></div>
+        <form className="modal-form" onSubmit={upload}>
+          <div className="form-grid"><label>Employee<select required disabled={!canManage} value={canManage ? employeeId : user.employeeId || ""} onChange={(e) => setEmployeeId(e.target.value)}><option value="">Select employee</option>{employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.firstName} {employee.lastName} · {employee.employeeNumber}</option>)}</select></label></div>
+          <div className="document-upload-list">
+            {rows.map((row, index) => <section className="document-upload-row" key={row.key}>
+              <div className="document-upload-row-heading"><strong>Document {index + 1}</strong>{rows.length > 1 && <button type="button" className="danger-btn" onClick={() => removeRow(row.key)}>Remove</button>}</div>
+              <div className="form-grid">
+                <label>Document type<select required value={row.documentType} onChange={(e) => updateRow(row.key, { documentType: e.target.value })}><option value="">Select type</option>{documentTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label>
+                <label>Document file<input type="file" required accept=".pdf,.png,.jpg,.jpeg,.docx,.xlsx,.txt" onChange={(e) => updateRow(row.key, { file: e.target.files?.[0] || null })}/>{row.file && <small className="subcell">{row.file.name} · {(row.file.size / 1024).toFixed(0)} KB</small>}</label>
+                <label>Issue date<input type="date" value={row.issueDate} onChange={(e) => updateRow(row.key, { issueDate: e.target.value })}/></label>
+                <label>Expiry date<input type="date" min={row.issueDate || undefined} value={row.expiryDate} onChange={(e) => updateRow(row.key, { expiryDate: e.target.value })}/></label>
+                <label>Notes<input maxLength={1000} value={row.notes} onChange={(e) => updateRow(row.key, { notes: e.target.value })} placeholder="Optional notes"/></label>
+              </div>
+            </section>)}
           </div>
-          <form className="modal-form" onSubmit={upload}>
-            <div className="form-grid">
-              <label>
-                Employee
-                <select
-                  required
-                  disabled={!canManage}
-                  value={canManage ? employeeId : user.employeeId || ""}
-                  onChange={(e) => setEmployeeId(e.target.value)}
-                >
-                  <option value="">Select employee</option>
-                  {employees.map((e) => (
-                    <option key={e.id} value={e.id}>
-                      {e.firstName} {e.lastName} · {e.employeeNumber}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Document type
-                <select
-                  value={documentType}
-                  onChange={(e) => setDocumentType(e.target.value)}
-                >
-                  {[
-                    "Passport",
-                    "Emirates ID",
-                    "IBAN letter from bank",
-                    "Identity",
-                    "Contract",
-                    "Right to work",
-                    "Qualification",
-                    "Other",
-                  ].map((x) => (
-                    <option key={x}>{x}</option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Issue date
-                <input
-                  type="date"
-                  value={issueDate}
-                  onChange={(e) => setIssueDate(e.target.value)}
-                />
-              </label>
-              <label>
-                Expiry date
-                <input
-                  type="date"
-                  value={expiryDate}
-                  min={issueDate || undefined}
-                  onChange={(e) => setExpiryDate(e.target.value)}
-                />
-              </label>
-              <label>
-                Files
-                <input
-                  type="file"
-                  multiple
-                  required
-                  accept=".pdf,.png,.jpg,.jpeg,.docx,.xlsx,.txt"
-                  onChange={(e) => setFiles((previous) => [...previous, ...Array.from(e.target.files || [])])}
-                />
-                <button type="button" className="secondary" onClick={() => document.getElementById("document-add-more")?.click()}>Add more</button>
-                <input id="document-add-more" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.docx,.xlsx,.txt" style={{ display: "none" }} onChange={(e) => setFiles((previous) => [...previous, ...Array.from(e.target.files || [])])} />
-                {files.length > 0 && <small className="subcell">{files.length} selected: {files.map((f) => f.name).join(", ")}</small>}
-              </label>
-              <label>
-                Notes
-                <input
-                  maxLength={1000}
-                  value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
-                />
-              </label>
-            </div>
-            <div className="modal-actions">
-              <button className="primary" disabled={busy || !files.length}>
-                {busy ? "Uploading…" : "Upload document"} <FileText size={16} />
-              </button>
-            </div>
-          </form>
-        </section>
-      )}
-      <section className="panel directory-panel">
-        <div className="panel-heading">
-          <div>
-            <h3>Stored documents</h3>
-            <p>Authenticated download and verification status.</p>
-          </div>
-          <button className="secondary" onClick={onRefresh}>
-            Refresh
-          </button>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Document</th>
-                <th>Employee</th>
-                <th>Type</th>
-                <th>Expiry</th>
-                <th>Size</th>
-                <th>Status</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {documents.map((d) => (
-                <tr key={d.id}>
-                  <td>
-                    <b>{d.documentName}</b>
-                    <small className="subcell">
-                      Uploaded{" "}
-                      {new Date(d.uploadedAt).toLocaleDateString("en-GB")}
-                    </small>
-                  </td>
-                  <td>{d.employeeName}</td>
-                  <td>{d.documentType}</td>
-                  <td>{d.expiryDate || "—"}</td>
-                  <td>{(d.fileSize / 1024).toFixed(0)} KB</td>
-                  <td>
-                    <span
-                      className={`status ${
-                        d.verificationStatus === "Verified"
-                          ? "status-active"
-                          : d.verificationStatus === "Rejected"
-                          ? "status-rejected"
-                          : "status-pending"
-                      }`}
-                    >
-                      {d.verificationStatus}
-                    </span>
-                  </td>
-                  <td>
-                    <a
-                      className="review-btn"
-                      href={`/api/v1/documents/${d.id}/download`}
-                    >
-                      Download
-                    </a>{" "}
-                    {canManage && d.verificationStatus === "Pending" && (
-                      <>
-                        <button
-                          className="review-btn"
-                          onClick={() => verify(d.id, "Verified")}
-                        >
-                          Verify
-                        </button>
-                        <button
-                          className="danger-btn"
-                          onClick={() => verify(d.id, "Rejected")}
-                        >
-                          Reject
-                        </button>
-                      </>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {!documents.length && (
-            <div className="empty-state">
-              No documents stored yet. Upload an employee document to begin.
-            </div>
-          )}
-        </div>
-      </section>
+          <div className="modal-actions"><button type="button" className="secondary" onClick={addRow}>+ Add another document</button><button className="primary" disabled={busy || !rows.length || !documentTypes.length}>{busy ? `Uploading ${rows.length} document(s)…` : `Upload all ${rows.length} document(s)`} <FileText size={16}/></button></div>
+        </form>
+      </section>}
+      <section className="panel directory-panel"><div className="panel-heading"><div><h3>Stored documents</h3><p>Authenticated download and verification status.</p></div><button className="secondary" onClick={onRefresh}>Refresh</button></div><div className="table-wrap"><table><thead><tr><th>Document</th><th>Employee</th><th>Type</th><th>Expiry</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead><tbody>{documents.map((d) => <tr key={d.id}><td><b>{d.documentName}</b><small className="subcell">Uploaded {new Date(d.uploadedAt).toLocaleDateString("en-GB")}</small></td><td>{d.employeeName}</td><td>{d.documentType}</td><td>{d.expiryDate || "—"}</td><td>{(d.fileSize / 1024).toFixed(0)} KB</td><td><span className={`status ${d.verificationStatus === "Verified" ? "status-active" : d.verificationStatus === "Rejected" ? "status-rejected" : "status-pending"}`}>{d.verificationStatus}</span></td><td><a className="review-btn" href={`/api/v1/documents/${d.id}/download`}>Download</a>{canManage && d.verificationStatus !== "Verified" && <><button className="review-btn" onClick={() => verify(d.id, "Verified")}>Verify</button><button className="danger-btn" onClick={() => verify(d.id, "Rejected")}>Reject</button></>}</td></tr>)}</tbody></table>{!documents.length && <div className="empty-state">No documents stored yet. Upload an employee document to begin.</div>}</div></section>
     </>
   );
 }
@@ -4178,7 +4045,7 @@ function LeaveBalancePage({ user }: { user: User | null }) {
   const [items, setItems] = useState<any[]>([]);
   const [settings, setSettings] = useState<any>({ roles: [], holidays: [] });
   const [role, setRole] = useState("");
-  const [annualDays, setAnnualDays] = useState("30");
+  const [annualDays, setAnnualDays] = useState("25");
   const [holidayDate, setHolidayDate] = useState("");
   const [holidayName, setHolidayName] = useState("");
   const [weekendDays, setWeekendDays] = useState<number[]>([0, 6]);

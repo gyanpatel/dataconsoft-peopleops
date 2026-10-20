@@ -310,17 +310,12 @@ func (s *Server) documents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.Store.DB.Exec(
-		r.Context(),
-		`INSERT INTO dcs_document_types(name,active)
-		 VALUES($1,true)
-		 ON CONFLICT(lower(name)) DO UPDATE SET active=true`,
-		docType,
-	); err != nil {
-		writeError(w, 500, "database_error",
-			"Could not register document type")
+	var configuredType string
+	if err := s.Store.DB.QueryRow(r.Context(), `SELECT name FROM dcs_document_types WHERE active=true AND lower(name)=lower($1)`, docType).Scan(&configuredType); err != nil {
+		writeError(w, 400, "invalid_document_type", "Choose a document type configured by HR")
 		return
 	}
+	docType = configuredType
 
 	mimeType := http.DetectContentType(data)
 	if ext == ".docx" || ext == ".xlsx" {
@@ -341,6 +336,17 @@ func (s *Server) documents(w http.ResponseWriter, r *http.Request) {
 	_, err = s.Store.DB.Exec(r.Context(), `INSERT INTO dcs_doc_store(id,employee_id,document_name,document_type,mime_type,file_size,doc_file,issue_date,expiry_date,notes,uploaded_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, id, employeeID, docName, docType, mimeType, len(data), data, issue, expiry, notes, u.ID)
 	if err != nil {
 		writeError(w, 500, "database_error", "Could not store document")
+		return
+	}
+	// Re-evaluate the onboarding gate whenever a document is uploaded. Pending checklist
+	// documents keep the employee inactive until HR verifies every uploaded checklist item.
+	if _, err := s.Store.DB.Exec(r.Context(), `UPDATE employees e SET status=CASE WHEN
+		EXISTS (SELECT 1 FROM dcs_document_types t WHERE t.active=true AND t.check_list=true)
+		AND NOT EXISTS (SELECT 1 FROM dcs_document_types t WHERE t.active=true AND t.check_list=true
+			AND (NOT EXISTS (SELECT 1 FROM dcs_doc_store d WHERE d.employee_id=e.id AND lower(d.document_type)=lower(t.name))
+			OR EXISTS (SELECT 1 FROM dcs_doc_store d WHERE d.employee_id=e.id AND lower(d.document_type)=lower(t.name) AND d.verification_status<>'Verified')))
+		THEN 'Active' ELSE 'Inactive' END, updated_at=NOW() WHERE e.id=$1 AND e.status<>'Terminated'`, employeeID); err != nil {
+		writeError(w, 500, "database_error", "Document was stored, but employee activation could not be updated")
 		return
 	}
 	s.Store.Audit(r.Context(), u.ID, "document.uploaded", "dcs_doc_store", id, "Uploaded document: "+docName, requestID(r))
@@ -399,6 +405,22 @@ func (s *Server) documentDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	if tag.RowsAffected() == 0 {
 		writeError(w, 404, "not_found", "Document not found")
+		return
+	}
+	var employeeID string
+	if err := s.Store.DB.QueryRow(r.Context(), `SELECT employee_id FROM dcs_doc_store WHERE id=$1`, id).Scan(&employeeID); err != nil {
+		writeError(w, 500, "database_error", "Document status was updated, but employee activation could not be checked")
+		return
+	}
+	// An employee is active only when every checklist type has at least one document and
+	// every uploaded document belonging to each checklist type is verified.
+	if _, err := s.Store.DB.Exec(r.Context(), `UPDATE employees e SET status=CASE WHEN
+		EXISTS (SELECT 1 FROM dcs_document_types t WHERE t.active=true AND t.check_list=true)
+		AND NOT EXISTS (SELECT 1 FROM dcs_document_types t WHERE t.active=true AND t.check_list=true
+			AND (NOT EXISTS (SELECT 1 FROM dcs_doc_store d WHERE d.employee_id=e.id AND lower(d.document_type)=lower(t.name))
+			OR EXISTS (SELECT 1 FROM dcs_doc_store d WHERE d.employee_id=e.id AND lower(d.document_type)=lower(t.name) AND d.verification_status<>'Verified')))
+		THEN 'Active' ELSE 'Inactive' END, updated_at=NOW() WHERE e.id=$1 AND e.status<>'Terminated'`, employeeID); err != nil {
+		writeError(w, 500, "database_error", "Document status was updated, but employee activation failed")
 		return
 	}
 	s.Store.Audit(r.Context(), u.ID, "document.status_changed", "dcs_doc_store", id, "Set document status to "+in.Status, requestID(r))
