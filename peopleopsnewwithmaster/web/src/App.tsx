@@ -194,6 +194,9 @@ export default function App() {
     [loading, setLoading] = useState(false),
     [error, setError] = useState(""),
     [toast, setToast] = useState(""),
+    [notifications, setNotifications] = useState<any[]>([]),
+    [showNotifications, setShowNotifications] = useState(false),
+    [notificationLoading, setNotificationLoading] = useState(false),
     [modal, setModal] = useState(""),
     [decisionNote, setDecisionNote] = useState(""),
     [selectedLeave, setSelectedLeave] = useState<Leave | null>(null),
@@ -271,6 +274,16 @@ export default function App() {
   useEffect(() => {
     load();
   }, [load]);
+  useEffect(() => {
+    if (!user) { setNotifications([]); return; }
+    let cancelled = false;
+    request<any>("/notifications").then((result) => {
+      if (!cancelled) setNotifications(result.items || []);
+    }).catch(() => {
+      if (!cancelled) setNotifications([]);
+    });
+    return () => { cancelled = true; };
+  }, [user?.id]);
   useEffect(() => {
     if (!toast) return;
     const id = window.setTimeout(() => setToast(""), 3500);
@@ -625,14 +638,35 @@ export default function App() {
               />
               <kbd>⌘ K</kbd>
             </div>
-            <button
-              className="icon-btn notification"
-              title="Notifications"
-              onClick={() => setToast("You’re all caught up.")}
-            >
-              <Bell size={18} />
-              <i />
-            </button>
+            <div className="notification-wrap">
+              <button
+                className={`icon-btn notification ${showNotifications ? "notification-open" : ""}`}
+                title="Notifications"
+                aria-label={`Notifications${notifications.length ? `, ${notifications.length} items` : ""}`}
+                aria-expanded={showNotifications}
+                onClick={async () => {
+                  const opening = !showNotifications;
+                  setShowNotifications(opening);
+                  if (!opening) return;
+                  setNotificationLoading(true);
+                  try {
+                    const result = await request<any>("/notifications");
+                    setNotifications(result.items || []);
+                  } catch (error: any) {
+                    setToast(error?.message || "Could not load notifications");
+                  } finally { setNotificationLoading(false); }
+                }}
+              >
+                <Bell size={18} />
+                {notifications.length > 0 && <i />}
+                {notifications.length > 0 && <span className="notification-count">{notifications.length > 99 ? "99+" : notifications.length}</span>}
+              </button>
+              {showNotifications && <div className="notification-popover" role="dialog" aria-label="Notifications">
+                <div className="notification-popover-heading"><div><b>Notifications</b><small>{notifications.length ? `${notifications.length} item${notifications.length === 1 ? "" : "s"} need attention` : "Your latest updates"}</small></div><button className="notification-close" aria-label="Close notifications" onClick={() => setShowNotifications(false)}><X size={16}/></button></div>
+                {notificationLoading ? <div className="notification-empty">Loading notifications…</div> : notifications.length ? <div className="notification-list">{notifications.map((item) => <button className="notification-item" key={item.id} onClick={() => { setShowNotifications(false); setPage(item.page || "Documents"); }}><span className={`notification-item-icon ${item.type === "document_expiry" ? "expiry" : "leave"}`}>{item.type === "document_expiry" ? <FileText size={16}/> : <CalendarDays size={16}/>}</span><span className="notification-item-copy"><b>{item.title}</b><span>{item.message}</span><small>{item.date ? `Date: ${item.date}` : "Action required"}</small></span><ChevronRight size={15}/></button>)}</div> : <div className="notification-empty"><CheckCircle2 size={22}/><b>You’re all caught up</b><span>No pending notifications for your account.</span></div>}
+                <div className="notification-popover-footer"><button onClick={async () => { setNotificationLoading(true); try { const result = await request<any>("/notifications"); setNotifications(result.items || []); } catch (error: any) { setToast(error?.message || "Could not refresh notifications"); } finally { setNotificationLoading(false); } }}><Activity size={13}/> Refresh</button></div>
+              </div>}
+            </div>
             <button
               className="icon-btn"
               title="Settings"
@@ -1843,6 +1877,7 @@ export default function App() {
             (user.permissions?.includes("app.configure") ? (
               <>
                 <MasterConfigPage onToast={setToast} />
+                <NotificationSettingsPage onToast={setToast} />
                 <RoleAccessPage onToast={setToast} />
                 <SalaryAlgorithmPage />
               </>
@@ -4038,6 +4073,14 @@ function BonusManagementPage({ onToast }: { onToast: (s: string) => void }) {
       <label>Bonus month<select value={month} onChange={e=>setMonth(e.target.value)}>{Array.from({length:12},(_,i)=><option key={i+1} value={i+1}>{new Date(2000,i,1).toLocaleString("en-GB",{month:"long"})}</option>)}</select></label>
     </div><div className="table-wrap"><table><thead><tr><th><input aria-label="Select all filtered employees" type="checkbox" checked={filtered.length>0&&filtered.every(e=>selected.includes(e.id))} onChange={e=>setSelected(prev=>e.target.checked?Array.from(new Set([...prev,...filtered.map(x=>x.id)])):prev.filter(id=>!filtered.some(x=>x.id===id)))}/></th><th>Employee</th><th>Employee number</th><th>Role</th></tr></thead><tbody>{filtered.map(e=><tr key={e.id}><td><input aria-label={`Select ${e.firstName} ${e.lastName}`} type="checkbox" checked={selected.includes(e.id)} onChange={ev=>setSelected(prev=>ev.target.checked?[...prev,e.id]:prev.filter(id=>id!==e.id))}/></td><td>{e.firstName} {e.lastName}</td><td>{e.employeeNumber||"—"}</td><td>{e.roleName||"—"}</td></tr>)}</tbody></table>{!filtered.length&&<div className="empty-state">No employees match these filters.</div>}</div><div className="form-actions"><span>{selected.length} employee(s) selected</span><button className="btn btn-primary" disabled={busy||!selected.length} onClick={save}>{busy?"Saving…":"Apply bonus"}</button></div></section>
     <section className="panel"><div className="panel-header"><h2>Bonus history</h2></div><div className="table-wrap"><table><thead><tr><th>Date</th><th>Employee</th><th>Bonus</th><th>Bonus month</th><th>Updated by</th></tr></thead><tbody>{history.map((h:any)=><tr key={h.id}><td>{h.createdAt?new Date(h.createdAt).toLocaleDateString("en-GB"):"—"}</td><td>{h.employeeName}</td><td>{money(h.bonusPayMinor||0)}</td><td>{new Date(2000,(h.bonusMonth||1)-1,1).toLocaleString("en-GB",{month:"long"})}</td><td>{h.updatedBy||"—"}</td></tr>)}</tbody></table>{!history.length&&<div className="empty-state">No bonus changes recorded yet.</div>}</div></section></>;
+}
+
+function NotificationSettingsPage({ onToast }: { onToast: (message: string) => void }) {
+  const [days, setDays] = useState("30");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => { request<any>("/notification-settings").then((result) => setDays(String(result.documentExpiryNoticeDays ?? 30))).catch((e) => setError(e.message)); }, []);
+  return <section className="panel directory-panel notification-settings-panel"><div className="panel-heading"><div><h3>Document expiry notifications</h3><p>Control how early HR and each employee are warned before an uploaded document expires.</p></div></div><form className="notification-settings-form" onSubmit={async (event) => { event.preventDefault(); setBusy(true); setError(""); try { const result = await request<any>("/notification-settings", { method: "PUT", body: JSON.stringify({ documentExpiryNoticeDays: Number(days) }) }); setDays(String(result.documentExpiryNoticeDays)); onToast(`Document expiry reminders set to ${result.documentExpiryNoticeDays} days`); } catch (e: any) { setError(e.message || "Could not save notification settings"); } finally { setBusy(false); } }}><label>Notify before expiry (days)<input type="number" min="1" max="365" value={days} onChange={(event) => setDays(event.target.value)} required /></label><p>Allowed range: 1–365 days. HR users with document-management access see all employees’ expiring documents; employees see only their own.</p><button className="primary" type="submit" disabled={busy}>{busy ? "Saving…" : "Save notification setting"}</button>{error && <span className="error-text">{error}</span>}</form></section>;
 }
 
 function LeaveBalancePage({ user }: { user: User | null }) {
