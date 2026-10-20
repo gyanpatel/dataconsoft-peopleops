@@ -19,7 +19,7 @@ VALUES
   ('salary-breakup','Salary breakup','Effective from','effectiveFrom','Effective from','date',true,true,80,'[]'::jsonb,'{}'::jsonb,'Date salary breakup becomes effective','dsc_employee_salary_breakup.effective_from'),
   ('bank-details','Bank details','Account name','accountName','Account name','text',true,true,10,'[]'::jsonb,'{}'::jsonb,'Name on the bank account','dcs_employee_bank_details.account_name'),
   ('bank-details','Bank details','Bank name','bankName','Bank name','text',false,true,20,'[]'::jsonb,'{}'::jsonb,'Name of bank','dcs_employee_bank_details.bank_name'),
-  ('bank-details','Bank details','Sort code','sortCode','Sort code','text',true,true,30,'[]'::jsonb,'{}'::jsonb,'UK bank sort code','dcs_employee_bank_details.sort_code'),
+  ('bank-details','Bank details','Branch','sortCode','Branch','text',true,true,30,'[]'::jsonb,'{}'::jsonb,'UK bank sort code','dcs_employee_bank_details.sort_code'),
   ('bank-details','Bank details','Account number','accountNumber','Account number','text',true,true,40,'[]'::jsonb,'{}'::jsonb,'Stored encrypted at rest','dcs_employee_bank_details.account_number_encrypted'),
   ('bank-details','Bank details','IBAN','iban','IBAN','text',false,true,50,'[]'::jsonb,'{}'::jsonb,'Stored encrypted at rest','dcs_employee_bank_details.iban_encrypted'),
   ('bank-details','Bank details','BIC / SWIFT','bicSwift','BIC / SWIFT','text',false,true,60,'[]'::jsonb,'{}'::jsonb,'International bank identifier','dcs_employee_bank_details.bic_swift')

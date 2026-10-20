@@ -59,8 +59,6 @@ type Employee = {
   employmentType: string;
   status: string;
   startDate: string;
-  salaryMinor: number;
-  currency: string;
   customFields?: Record<string, any>;
   photoId?: string;
   roleName?: string;
@@ -2030,6 +2028,8 @@ export default function App() {
               />
             ) : modal === "leave" ? (
               <LeaveForm
+                employees={employees}
+                canBookForOthers={!!user.permissions?.includes("leave.review")}
                 onCancel={() => setModal("")}
                 onSave={async (data) => {
                   try {
@@ -2523,9 +2523,7 @@ function EmployeeDetails({
     status: e.status,
     startDate: e.startDate
       ? new Date(e.startDate).toLocaleDateString("en-GB")
-      : "",
-    salary: e.salaryMinor != null ? money(e.salaryMinor) : "",
-    currency: e.currency,
+      : "" 
   };
   const configured = (fields || [])
     .filter((f) => f.visible)
@@ -2773,7 +2771,7 @@ function SalaryBreakupSection({
     variablePayMinor: 0,
     allowancesMinor: 0,
     deductionsMinor: 0,
-    currency: "GBP",
+    currency: "AED",
     effectiveFrom: new Date().toISOString().slice(0, 10),
   });
   const [busy, setBusy] = useState(false);
@@ -2898,8 +2896,11 @@ function BankDetailsSection({
     bicSwift: "",
   });
   const [loaded, setLoaded] = useState(false),
-    [busy, setBusy] = useState(false);
+    [busy, setBusy] = useState(false),
+    [sortCodeLabel, setSortCodeLabel] = useState("Sort Code"),
+    [bankFieldConfig, setBankFieldConfig] = useState<Record<string, any>>({});
   useEffect(() => {
+    request<any>("/app-master?page=bank-details").then((x) => { const config: Record<string, any> = {}; for (const field of x.items || []) config[field.fieldKey] = field; setBankFieldConfig(config); const field = config.sortCode; if (field?.label) setSortCodeLabel(field.label); }).catch(() => {});
     request<any>(`/employees/${employeeId}/bank-details`)
       .then((x) => setData({ ...data, ...x }))
       .catch(() => {})
@@ -2943,6 +2944,8 @@ function BankDetailsSection({
           Account name
           <input
             disabled={!canEdit}
+            minLength={bankFieldConfig.accountName?.minLength ?? undefined}
+            maxLength={bankFieldConfig.accountName?.maxLength ?? undefined}
             value={data.accountName || ""}
             onChange={(e) => setData({ ...data, accountName: e.target.value })}
           />
@@ -2951,14 +2954,18 @@ function BankDetailsSection({
           Bank name
           <input
             disabled={!canEdit}
+            minLength={bankFieldConfig.bankName?.minLength ?? undefined}
+            maxLength={bankFieldConfig.bankName?.maxLength ?? undefined}
             value={data.bankName || ""}
             onChange={(e) => setData({ ...data, bankName: e.target.value })}
           />
         </label>
         <label>
-          Sort code
+          {sortCodeLabel}
           <input
             disabled={!canEdit}
+            minLength={bankFieldConfig.sortCode?.minLength ?? undefined}
+            maxLength={bankFieldConfig.sortCode?.maxLength ?? undefined}
             value={data.sortCode || ""}
             onChange={(e) => setData({ ...data, sortCode: e.target.value })}
           />
@@ -2967,6 +2974,8 @@ function BankDetailsSection({
           Account number
           <input
             disabled={!canEdit}
+            minLength={bankFieldConfig.accountNumber?.minLength ?? undefined}
+            maxLength={bankFieldConfig.accountNumber?.maxLength ?? undefined}
             value={data.accountNumber || ""}
             onChange={(e) =>
               setData({ ...data, accountNumber: e.target.value })
@@ -2979,6 +2988,8 @@ function BankDetailsSection({
           IBAN
           <input
             disabled={!canEdit}
+            minLength={bankFieldConfig.iban?.minLength ?? undefined}
+            maxLength={bankFieldConfig.iban?.maxLength ?? undefined}
             value={data.iban || ""}
             onChange={(e) => setData({ ...data, iban: e.target.value })}
             autoComplete="off"
@@ -2988,6 +2999,8 @@ function BankDetailsSection({
           BIC / SWIFT
           <input
             disabled={!canEdit}
+            minLength={bankFieldConfig.bicSwift?.minLength ?? undefined}
+            maxLength={bankFieldConfig.bicSwift?.maxLength ?? undefined}
             value={data.bicSwift || ""}
             onChange={(e) => setData({ ...data, bicSwift: e.target.value })}
           />
@@ -3162,12 +3175,15 @@ function EmployeeForm({
               String(v[f.fieldKey]).trim() === "")
         );
         if (missing.length) {
-          setFormError(
-            "Complete these required fields: " +
-              missing.map((f: any) => f.label).join(", ")
-          );
+          setFormError("Complete these required fields: " + missing.map((f: any) => f.label).join(", "));
           return;
         }
+        const invalidLength = renderFields.find((f: any) => {
+          if (v[f.fieldKey] == null || v[f.fieldKey] === "" || f.dataType === "number" || f.dataType === "checkbox") return false;
+          const length = String(v[f.fieldKey]).length;
+          return (f.minLength != null && length < Number(f.minLength)) || (f.maxLength != null && length > Number(f.maxLength));
+        });
+        if (invalidLength) { setFormError(`${invalidLength.label} must be ${invalidLength.minLength != null ? `at least ${invalidLength.minLength}` : ""}${invalidLength.minLength != null && invalidLength.maxLength != null ? " and " : ""}${invalidLength.maxLength != null ? `no more than ${invalidLength.maxLength}` : ""} characters.`); return; }
         setBusy(true);
         try {
           const customFields: Record<string, any> = {};
@@ -3278,6 +3294,8 @@ function EmployeeForm({
               ) : f.dataType === "textarea" ? (
                 <textarea
                   rows={2}
+                  minLength={f.minLength ?? undefined}
+                  maxLength={f.maxLength ?? undefined}
                   value={v[f.fieldKey] ?? ""}
                   onChange={(e) => set(f.fieldKey, e.target.value)}
                   required={f.required}
@@ -3298,6 +3316,8 @@ function EmployeeForm({
                       : "text"
                   }
                   min={f.dataType === "number" ? 0 : undefined}
+                  minLength={f.dataType === "number" ? undefined : (f.minLength ?? undefined)}
+                  maxLength={f.dataType === "number" ? undefined : (f.maxLength ?? undefined)}
                   value={v[f.fieldKey] ?? ""}
                   onChange={(e) => set(f.fieldKey, e.target.value)}
                   required={f.required}
@@ -3406,9 +3426,13 @@ function EmployeeForm({
 }
 
 function LeaveForm({
+  employees = [],
+  canBookForOthers = false,
   onCancel,
   onSave,
 }: {
+  employees?: Employee[];
+  canBookForOthers?: boolean;
   onCancel: () => void;
   onSave: (x: any) => void;
 }) {
@@ -3418,8 +3442,11 @@ function LeaveForm({
     endDate: "",
     days: 1,
     reason: "",
+    employeeId: "",
   });
+  const [employeeSearch, setEmployeeSearch] = useState("");
   const [busy, setBusy] = useState(false);
+  const employeeMatches = employees.filter((e) => `${e.firstName} ${e.lastName} ${e.employeeNumber} ${e.email}`.toLowerCase().includes(employeeSearch.toLowerCase())).slice(0, 8);
   return (
     <form
       className="modal-form"
@@ -3433,6 +3460,10 @@ function LeaveForm({
         }
       }}
     >
+      {canBookForOthers && <label>Employee (search by name or employee number) *
+        <input value={employeeSearch} onChange={(e) => { setEmployeeSearch(e.target.value); setV({ ...v, employeeId: "" }); }} placeholder="Start typing an employee…" autoComplete="off" required={!v.employeeId} />
+        {employeeSearch && !v.employeeId && <div className="soft-search-results">{employeeMatches.map((employee) => <button type="button" className="review-btn" key={employee.id} onClick={() => { setV({ ...v, employeeId: employee.id }); setEmployeeSearch(`${employee.firstName} ${employee.lastName} (${employee.employeeNumber})`); }}>{employee.firstName} {employee.lastName} · {employee.employeeNumber}</button>)}{!employeeMatches.length && <small>No matching employees</small>}</div>}
+      </label>}
       <label>
         Leave type
         <select
@@ -4714,12 +4745,17 @@ function PayrollPage({
       "Payroll " + new Date().toISOString().slice(0, 7)
     ),
     [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
+    [error, setError] = useState(""),
+    [ledgerYear, setLedgerYear] = useState(String(new Date().getFullYear())),
+    [ledgerMonths, setLedgerMonths] = useState<string[]>([String(new Date().getMonth() + 1)]),
+    [selectedPayments, setSelectedPayments] = useState<string[]>([]);
   async function load() {
     setError("");
     try {
-      const p = await request<any>("/payroll");
+      const ledgerQuery = isAccounts ? `?year=${encodeURIComponent(ledgerYear)}&month=${encodeURIComponent(ledgerMonths.join(","))}` : "";
+      const p = await request<any>(`/payroll${ledgerQuery}`);
       setItems(p.items || []);
+      setSelectedPayments((selected) => selected.filter((id) => (p.items || []).some((x: any) => x.id === id && x.entryType === "debit" && x.status === "Pending")));
       if (isAccounts) {
         const sm = await request<any>("/payroll/summaries");
         setSummaries(sm.items || []);
@@ -4730,7 +4766,7 @@ function PayrollPage({
   }
   useEffect(() => {
     load();
-  }, [user.id]);
+  }, [user.id, ledgerYear, ledgerMonths.join(",")]);
   async function action(path: string, body: any, msg: string) {
     setBusy(true);
     try {
@@ -4739,6 +4775,7 @@ function PayrollPage({
         body: JSON.stringify(body),
       });
       onToast(res.message || msg);
+      if (path === "/payroll/payments/clear") setSelectedPayments([]);
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Payroll action failed");
@@ -4998,10 +5035,16 @@ function PayrollPage({
               </p>
             </div>
           </div>
+          <div className="form-grid ledger-filters">
+            <label>Year <select value={ledgerYear} onChange={(e) => setLedgerYear(e.target.value)}>{Array.from({length: 8}, (_, i) => String(new Date().getFullYear() - i)).map((year) => <option key={year}>{year}</option>)}</select></label>
+            <label>Months (select one or more) <select multiple value={ledgerMonths} onChange={(e) => setLedgerMonths(Array.from(e.target.selectedOptions, (o: HTMLOptionElement) => o.value))}>{Array.from({length:12}, (_,i) => String(i+1)).map((m) => <option key={m} value={m}>{new Date(2000, Number(m)-1, 1).toLocaleString("en-GB", {month:"long"})}</option>)}</select></label>
+            {canClear && <div className="modal-actions"><button className="secondary" disabled={!selectedPayments.length || busy} onClick={() => action("/payroll/payments/clear", {ids:selectedPayments}, "Payments cleared")}>Mark selected cleared ({selectedPayments.length})</button></div>}
+          </div>
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
+                  <th><input aria-label="Select all pending payments" type="checkbox" checked={items.filter((x) => x.entryType === "debit" && x.status === "Pending").length > 0 && items.filter((x) => x.entryType === "debit" && x.status === "Pending").every((x) => selectedPayments.includes(x.id))} onChange={(e) => setSelectedPayments(e.target.checked ? items.filter((x) => x.entryType === "debit" && x.status === "Pending").map((x) => x.id) : [])} /></th>
                   <th>Employee</th>
                   <th>Period</th>
                   <th>Type</th>
@@ -5014,6 +5057,7 @@ function PayrollPage({
               <tbody>
                 {items.map((x) => (
                   <tr key={x.id}>
+                    <td><input aria-label={`Select payment ${x.id}`} type="checkbox" disabled={x.entryType !== "debit" || x.status !== "Pending" || !canClear} checked={selectedPayments.includes(x.id)} onChange={(e) => setSelectedPayments((old) => e.target.checked ? [...old, x.id] : old.filter((id) => id !== x.id))} /></td>
                     <td>
                       {employees.find((e) => e.id === x.employeeId)
                         ?.firstName || x.employeeId}

@@ -87,6 +87,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/payroll/summaries", s.protected(http.HandlerFunc(s.salarySummaries)))
 	mux.Handle("POST /api/v1/payroll/calculate", s.protected(http.HandlerFunc(s.calculatePayroll)))
 	mux.Handle("POST /api/v1/payroll/issue", s.protected(http.HandlerFunc(s.issuePayroll)))
+	mux.Handle("POST /api/v1/payroll/payments/clear", s.protected(http.HandlerFunc(s.clearPaymentsBulk)))
 	mux.Handle("POST /api/v1/payroll/payments/{id}/clear", s.protected(http.HandlerFunc(s.clearPayment)))
 	mux.Handle("GET /api/v1/payroll/{id}/payslip.pdf", s.protected(http.HandlerFunc(s.payslipPDF)))
 	mux.Handle("GET /api/v1/roles", s.protected(http.HandlerFunc(s.roles)))
@@ -374,18 +375,18 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 type Employee struct {
-	ID           string         `json:"id"`
-	Number       string         `json:"employeeNumber"`
-	First        string         `json:"firstName"`
-	Last         string         `json:"lastName"`
-	Email        string         `json:"email"`
-	Department   string         `json:"department"`
-	Title        string         `json:"jobTitle"`
-	Location     string         `json:"location"`
-	Type         string         `json:"employmentType"`
-	Status       string         `json:"status"`
-	StartDate    time.Time      `json:"startDate"`
-	SalaryMinor  int64          `json:"salaryMinor"`
+	ID         string    `json:"id"`
+	Number     string    `json:"employeeNumber"`
+	First      string    `json:"firstName"`
+	Last       string    `json:"lastName"`
+	Email      string    `json:"email"`
+	Department string    `json:"department"`
+	Title      string    `json:"jobTitle"`
+	Location   string    `json:"location"`
+	Type       string    `json:"employmentType"`
+	Status     string    `json:"status"`
+	StartDate  time.Time `json:"startDate"`
+	//SalaryMinor  int64          `json:"salaryMinor"`
 	Currency     string         `json:"currency"`
 	CustomFields map[string]any `json:"customFields,omitempty"`
 	PhotoID      string         `json:"photoId,omitempty"`
@@ -438,17 +439,17 @@ func (s *Server) updateEmployee(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	var in struct {
-		Number       string         `json:"employeeNumber"`
-		First        string         `json:"firstName"`
-		Last         string         `json:"lastName"`
-		Email        string         `json:"email"`
-		Department   string         `json:"department"`
-		Title        string         `json:"jobTitle"`
-		Location     string         `json:"location"`
-		Type         string         `json:"employmentType"`
-		Status       string         `json:"status"`
-		StartDate    string         `json:"startDate"`
-		SalaryMinor  int64          `json:"salaryMinor"`
+		Number     string `json:"employeeNumber"`
+		First      string `json:"firstName"`
+		Last       string `json:"lastName"`
+		Email      string `json:"email"`
+		Department string `json:"department"`
+		Title      string `json:"jobTitle"`
+		Location   string `json:"location"`
+		Type       string `json:"employmentType"`
+		Status     string `json:"status"`
+		StartDate  string `json:"startDate"`
+		//SalaryMinor  int64          `json:"salaryMinor"`
 		CustomFields map[string]any `json:"customFields"`
 		PhotoData    string         `json:"photoData"`
 		PhotoName    string         `json:"photoName"`
@@ -679,6 +680,7 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 		}
 		if maxLen.Valid && len([]rune(textValue)) > int(maxLen.Int32) {
 			configRows.Close()
+			log.Println("validation_error", label+" exceeds the maximum length", textValue, int(maxLen.Int32), len([]rune(textValue)))
 			writeError(w, 400, "validation_error", label+" exceeds the maximum length")
 			return
 		}
@@ -1044,16 +1046,18 @@ func (s *Server) leaveRequests(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) createLeave(w http.ResponseWriter, r *http.Request) {
 	u := current(r)
-	if u.EmployeeID == "" {
+	canBookForOthers := s.hasPermission(r.Context(), u.Role, "leave.review")
+	if u.EmployeeID == "" && !canBookForOthers {
 		writeError(w, 403, "forbidden", "Your user account is not linked to an employee profile")
 		return
 	}
 	var in struct {
-		Type   string  `json:"leaveType"`
-		Start  string  `json:"startDate"`
-		End    string  `json:"endDate"`
-		Days   float64 `json:"days"`
-		Reason string  `json:"reason"`
+		EmployeeID string  `json:"employeeId"`
+		Type       string  `json:"leaveType"`
+		Start      string  `json:"startDate"`
+		End        string  `json:"endDate"`
+		Days       float64 `json:"days"`
+		Reason     string  `json:"reason"`
 	}
 	if decode(r, &in) != nil || in.Type == "" || in.Days <= 0 || in.Days > 365 || len(in.Reason) > 1000 {
 		writeError(w, 400, "validation_error", "Enter a leave type, valid dates, days and reason")
@@ -1065,14 +1069,27 @@ func (s *Server) createLeave(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "validation_error", "End date must be on or after start date")
 		return
 	}
+	targetEmployeeID := u.EmployeeID
+	if canBookForOthers && strings.TrimSpace(in.EmployeeID) != "" {
+		targetEmployeeID = strings.TrimSpace(in.EmployeeID)
+	}
+	if targetEmployeeID == "" {
+		writeError(w, 400, "validation_error", "Select an employee")
+		return
+	}
+	var employeeExists bool
+	if err := s.Store.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM employees WHERE id=$1)`, targetEmployeeID).Scan(&employeeExists); err != nil || !employeeExists {
+		writeError(w, 400, "validation_error", "Selected employee was not found")
+		return
+	}
 	id := auth.NewID()
 	now := time.Now().UTC()
-	_, e := s.Store.DB.Exec(s.Store.Ctx, `INSERT INTO leave_requests(id,employee_id,leave_type,start_date,end_date,days,reason,status,submitted_at) VALUES($1,$2,$3,$4,$5,$6,$7,'Pending',$8)`, id, u.EmployeeID, in.Type, start, end, in.Days, strings.TrimSpace(in.Reason), now)
+	_, e := s.Store.DB.Exec(r.Context(), `INSERT INTO leave_requests(id,employee_id,leave_type,start_date,end_date,days,reason,status,submitted_at) VALUES($1,$2,$3,$4,$5,$6,$7,'Pending',$8)`, id, targetEmployeeID, in.Type, start, end, in.Days, strings.TrimSpace(in.Reason), now)
 	if e != nil {
 		writeError(w, 500, "database_error", "Could not submit leave request")
 		return
 	}
-	s.Store.Audit(r.Context(), u.ID, "leave.submitted", "leave_request", id, "Leave request submitted", requestID(r))
+	s.Store.Audit(r.Context(), u.ID, "leave.submitted", "leave_request", id, "Leave request submitted for employee "+targetEmployeeID, requestID(r))
 	writeJSON(w, 201, map[string]any{"id": id, "status": "Pending"})
 }
 func (s *Server) leaveDecision(w http.ResponseWriter, r *http.Request) {

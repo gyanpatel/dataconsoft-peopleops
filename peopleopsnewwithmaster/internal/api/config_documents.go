@@ -72,6 +72,10 @@ func (s *Server) appMaster(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "validation_error", "Provide valid page, field key, label and supported data type")
 			return
 		}
+		if in.MinLength != nil && *in.MinLength < 0 || in.MaxLength != nil && *in.MaxLength < 0 || in.MinLength != nil && in.MaxLength != nil && *in.MinLength > *in.MaxLength {
+			writeError(w, 400, "validation_error", "Minimum length must be non-negative and cannot exceed maximum length")
+			return
+		}
 		opts, _ := json.Marshal(in.Options)
 		cfg, _ := json.Marshal(in.Config)
 		id := int64(0)
@@ -103,6 +107,10 @@ func (s *Server) appMaster(w http.ResponseWriter, r *http.Request) {
 		}
 		if decode(r, &in) != nil || in.ID < 1 || !validConfig(in.PageID, in.PageName, in.FieldKey, in.Label, in.DataType) {
 			writeError(w, 400, "validation_error", "Invalid application configuration")
+			return
+		}
+		if in.MinLength != nil && *in.MinLength < 0 || in.MaxLength != nil && *in.MaxLength < 0 || in.MinLength != nil && in.MaxLength != nil && *in.MinLength > *in.MaxLength {
+			writeError(w, 400, "validation_error", "Minimum length must be non-negative and cannot exceed maximum length")
 			return
 		}
 		opts, _ := json.Marshal(in.Options)
