@@ -89,6 +89,35 @@ type Metrics = {
 const API = "/api/v1";
 let appCurrency = "GBP";
 let appTimeZone = "Asia/Dubai";
+new Date()
+// Settings may contain legacy display symbols instead of ISO/IANA codes.
+// Normalize them before they reach Intl APIs so one bad setting cannot crash a page.
+const normalizeAppCurrency = (value: unknown): string => {
+  const raw = String(value ?? "").trim();
+  const upper = raw.toUpperCase();
+  if (/^[A-Z]{3}$/.test(upper)) return upper;
+  if (["د.إ", "AED — UAE DIRHAM", "UAE DIRHAM"].includes(upper)) return "AED";
+  if (["£", "POUND STERLING"].includes(upper)) return "GBP";
+  if (["$", "US DOLLAR"].includes(upper)) return "USD";
+  if (["€", "EURO"].includes(upper)) return "EUR";
+  return "GBP";
+};
+const normalizeAppTimeZone = (value: unknown): string => {
+  const candidate = String(value ?? "").trim();
+  if (candidate) {
+    try {
+      new Intl.DateTimeFormat("en-GB", { timeZone: candidate }).format(new Date());
+      return candidate;
+    } catch {
+      // Fall through to the configured safe default.
+    }
+  }
+  return "Asia/Dubai";
+};
+const applyAppSettings = (settings: { currency?: unknown; timezone?: unknown }) => {
+  appCurrency = normalizeAppCurrency(settings.currency);
+  appTimeZone = normalizeAppTimeZone(settings.timezone);
+};
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (!headers.has("Content-Type"))
@@ -270,7 +299,7 @@ export default function App() {
       .then((x) => {
         setUser(x.user);
         setMustChangePassword(!!x.mustChangePassword);
-        request<{currency:string;timezone:string}>("/app-settings").then(cfg => { appCurrency=cfg.currency || "GBP"; appTimeZone=cfg.timezone || "Asia/Dubai"; }).catch(() => {});
+        request<{currency:string;timezone:string}>("/app-settings").then(applyAppSettings).catch(() => {});
       })
       .catch(() => setUser(null));
   }, []);
@@ -306,7 +335,7 @@ export default function App() {
       );
       setUser(x.user);
       setMustChangePassword(!!x.mustChangePassword);
-      request<{currency:string;timezone:string}>("/app-settings").then(cfg => { appCurrency=cfg.currency || "GBP"; appTimeZone=cfg.timezone || "Asia/Dubai"; }).catch(() => {});
+      request<{currency:string;timezone:string}>("/app-settings").then(applyAppSettings).catch(() => {});
       setPage("Dashboard");
     } catch (e) {
       setLoginError(e instanceof Error ? e.message : "Could not sign in");
@@ -703,10 +732,7 @@ export default function App() {
             <>
               <div className="page-heading">
                 <div>
-                  <div className="eyebrow green-eyebrow">
-                    WEDNESDAY, 14 OCTOBER 2026
-                  </div>
-                  <h1>
+                  <div className="eyebrow green-eyebrow">{new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase()}</div>                  <h1>
                     Good morning, {user.name.split(" ")[0]}{" "}
                     <span className="wave">✦</span>
                   </h1>
@@ -3218,7 +3244,7 @@ function EmployeeForm({
           return;
         }
         const invalidLength = renderFields.find((f: any) => {
-          if (v[f.fieldKey] == null || v[f.fieldKey] === "" || f.dataType === "checkbox") return false;
+          if (v[f.fieldKey] == null || v[f.fieldKey] === "" || f.dataType === "number" || f.dataType === "checkbox") return false;
           const length = String(v[f.fieldKey]).length;
           return (f.minLength != null && length < Number(f.minLength)) || (f.maxLength != null && length > Number(f.maxLength));
         });
@@ -3230,9 +3256,9 @@ function EmployeeForm({
             if (!standard.has(f.fieldKey))
               customFields[f.fieldKey] =
                 f.dataType === "number"
-                  ? v[f.fieldKey] === "" || v[f.fieldKey] == null
-                  ? null
-                  : String(v[f.fieldKey])
+                  ? v[f.fieldKey] === ""
+                    ? null
+                    : Number(v[f.fieldKey])
                   : f.dataType === "checkbox"
                   ? Boolean(v[f.fieldKey])
                   : v[f.fieldKey] ?? "";
@@ -3603,8 +3629,8 @@ function LeaveForm({
 }
 function GlobalApplicationSettings({onToast,onSaved}:{onToast:(s:string)=>void;onSaved:()=>void}) {
  const [currency,setCurrency]=useState("GBP"); const [timezone,setTimezone]=useState("Asia/Dubai"); const [busy,setBusy]=useState(false); const [error,setError]=useState("");
- useEffect(()=>{request<{currency:string;timezone:string}>("/app-settings").then(x=>{setCurrency(x.currency||"GBP");setTimezone(x.timezone||"Asia/Dubai")}).catch(e=>setError(e.message))},[]);
- async function save(){setBusy(true);setError("");try{const x=await request<{currency:string;timezone:string;message?:string}>("/app-settings",{method:"PUT",body:JSON.stringify({currency,timezone})});appCurrency=x.currency;appTimeZone=x.timezone;onToast(x.message||"Global settings saved");onSaved();}catch(e){setError(e instanceof Error?e.message:"Could not save settings")}finally{setBusy(false)}}
+ useEffect(()=>{request<{currency:string;timezone:string}>("/app-settings").then(x=>{setCurrency(normalizeAppCurrency(x.currency));setTimezone(normalizeAppTimeZone(x.timezone))}).catch(e=>setError(e.message))},[]);
+ async function save(){setBusy(true);setError("");try{const x=await request<{currency:string;timezone:string;message?:string}>("/app-settings",{method:"PUT",body:JSON.stringify({currency,timezone})});applyAppSettings(x);setCurrency(appCurrency);setTimezone(appTimeZone);onToast(x.message||"Global settings saved");onSaved();}catch(e){setError(e instanceof Error?e.message:"Could not save settings")}finally{setBusy(false)}}
  return <section className="panel directory-panel"><div className="panel-heading"><div><h3>Global application settings</h3><p>Single source of truth for currency formatting and the application time zone.</p></div></div>{error&&<div className="error-banner">{error}</div>}<div className="form-grid"><label>Default currency (ISO 4217)<select value={currency} onChange={e=>setCurrency(e.target.value)}><option value="GBP">GBP — Pound sterling</option><option value="AED">AED — UAE dirham</option><option value="USD">USD — US dollar</option><option value="EUR">EUR — Euro</option><option value="SAR">SAR — Saudi riyal</option><option value="INR">INR — Indian rupee</option></select></label><label>Application time zone<select value={timezone} onChange={e=>setTimezone(e.target.value)}>{["Asia/Dubai","Europe/London","Europe/Paris","UTC","Asia/Kolkata","Asia/Riyadh","America/New_York","America/Los_Angeles","Asia/Singapore"].map(z=><option key={z} value={z}>{z}</option>)}</select></label></div><div className="modal-actions"><button className="primary" disabled={busy} onClick={save}>{busy?"Saving…":"Save global settings"}</button></div><p className="subcell">Currency updates apply to global UI formatting and generated documents that use the default currency. Restart the API service after changing the time zone so server-side timestamps use the new setting.</p></section>
 }
 
@@ -4658,6 +4684,7 @@ function PayrollPage({
   const canClear = !!user.permissions?.includes("payroll.approve");
   const [items, setItems] = useState<any[]>([]),
     [summaries, setSummaries] = useState<any[]>([]),
+    [salarySummarySearch, setSalarySummarySearch] = useState(""),
     [startDate, setStartDate] = useState(
       new Date().toISOString().slice(0, 7) + "-01"
     ),
@@ -4717,6 +4744,27 @@ function PayrollPage({
       currency: appCurrency,
       maximumFractionDigits: 2,
     }).format((minor || 0) / 100);
+  const filteredSalarySummaries = summaries.filter((summary) => {
+    const employee = employees.find((e) => e.id === summary.employeeId);
+    const employeeName =
+      summary.employeeName ||
+      (employee ? `${employee.firstName} ${employee.lastName}` : "") ||
+      summary.employeeId ||
+      "";
+    const searchable = [
+      employeeName,
+      employee?.employeeNumber,
+      employee?.email,
+      summary.employeeId,
+      summary.periodStart,
+      summary.periodEnd,
+      summary.status,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return searchable.includes(salarySummarySearch.trim().toLowerCase());
+  });
   return (
     <>
       <div className="page-heading">
@@ -4813,9 +4861,20 @@ function PayrollPage({
                 <h3>Salary summaries</h3>
                 <p>Review calculated values before issuing payments.</p>
               </div>
-              <button className="secondary" onClick={load}>
-                Refresh
-              </button>
+              <div className="table-tools">
+                <div className="search-field">
+                  <Search size={16} />
+                  <input
+                    aria-label="Search salary summaries"
+                    placeholder="Search salary summaries…"
+                    value={salarySummarySearch}
+                    onChange={(e) => setSalarySummarySearch(e.target.value)}
+                  />
+                </div>
+                <button className="secondary" onClick={load}>
+                  Refresh
+                </button>
+              </div>
             </div>
             <div className="table-wrap">
               <table>
@@ -4833,7 +4892,7 @@ function PayrollPage({
                   </tr>
                 </thead>
                 <tbody>
-                  {summaries.map((x) => (
+                  {filteredSalarySummaries.map((x) => (
                     <tr key={x.id}>
                       <td>
                         {x.employeeName ||
@@ -4875,10 +4934,11 @@ function PayrollPage({
                   ))}
                 </tbody>
               </table>
-              {!summaries.length && (
+              {!filteredSalarySummaries.length && (
                 <div className="empty-state">
-                  No salary summaries yet. Calculate a period after attendance
-                  and salary breakup are configured.
+                  {salarySummarySearch.trim()
+                    ? "No salary summaries match your search."
+                    : "No salary summaries yet. Calculate a period after attendance and salary breakup are configured."}
                 </div>
               )}
             </div>
