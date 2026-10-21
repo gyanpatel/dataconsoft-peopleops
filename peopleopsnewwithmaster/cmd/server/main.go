@@ -53,14 +53,11 @@ func main() {
 	// The configured Windows time-zone label is mapped to its IANA equivalent
 	// because Go's time.LoadLocation uses the IANA time-zone database.
 	var configuredZone string
-	if err := st.DB.QueryRow(context.Background(), `SELECT setting_value FROM dcs_app_settings WHERE setting_key='timezone'`).Scan(&configuredZone); err != nil {
+	if err := st.DB.QueryRow(context.Background(), `SELECT setting_symbol FROM dcs_app_settings WHERE setting_key='timezone'`).Scan(&configuredZone); err != nil {
 		logger.Error("failed to read configured time zone", "error", err)
 		os.Exit(1)
 	}
 	zoneID := strings.TrimSpace(configuredZone)
-	if strings.EqualFold(zoneID, "Arabian Standard Time") {
-		zoneID = "Asia/Dubai"
-	}
 	loc, err := time.LoadLocation(zoneID)
 	if err != nil {
 		logger.Error("configured time zone is invalid", "configuredZone", configuredZone, "error", err)

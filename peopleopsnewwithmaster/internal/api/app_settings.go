@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -13,13 +14,13 @@ func (s *Server) appSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		var currency, zone string
-		err := s.Store.DB.QueryRow(r.Context(), `SELECT COALESCE(MAX(setting_value) FILTER (WHERE setting_key='currency'),'GBP'), COALESCE(MAX(setting_value) FILTER (WHERE setting_key='timezone'),'Asia/Dubai') FROM dcs_app_settings`).Scan(&currency, &zone)
+		var currency, zone, symbol string
+		err := s.Store.DB.QueryRow(r.Context(), `SELECT COALESCE(MAX(setting_value) FILTER (WHERE setting_key='currency'),'GBP'), COALESCE(MAX(setting_symbol) FILTER (WHERE setting_key='currency'),'Dh.'),COALESCE(MAX(setting_value) FILTER (WHERE setting_key='timezone'),'Asia/Dubai') FROM dcs_app_settings`).Scan(&currency, &symbol, &zone)
 		if err != nil {
 			writeError(w, 500, "database_error", "Could not load application settings")
 			return
 		}
-		writeJSON(w, 200, map[string]string{"currency": strings.TrimSpace(currency), "timezone": strings.TrimSpace(zone)})
+		writeJSON(w, 200, map[string]string{"currency": strings.TrimSpace(currency), "timezone": strings.TrimSpace(zone), "cursymbol": strings.TrimSpace(symbol)})
 		return
 	}
 	if r.Method != http.MethodPut {
@@ -41,6 +42,7 @@ func (s *Server) appSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := time.LoadLocation(in.Timezone); err != nil {
+		log.Println("validation_error", "Timezone must be a valid IANA time-zone name, such as Asia/Dubai", err, in.Timezone)
 		writeError(w, 400, "validation_error", "Timezone must be a valid IANA time-zone name, such as Asia/Dubai")
 		return
 	}
