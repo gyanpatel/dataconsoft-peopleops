@@ -89,7 +89,6 @@ type Metrics = {
 const API = "/api/v1";
 let appCurrency = "GBP";
 let appTimeZone = "Asia/Dubai";
-new Date()
 // Settings may contain legacy display symbols instead of ISO/IANA codes.
 // Normalize them before they reach Intl APIs so one bad setting cannot crash a page.
 const normalizeAppCurrency = (value: unknown): string => {
@@ -732,8 +731,9 @@ export default function App() {
             <>
               <div className="page-heading">
                 <div>
-                  <div className="eyebrow green-eyebrow">{new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase()}</div>                  <h1>
-                    Good morning, {user.name.split(" ")[0]}{" "}
+                <div className="eyebrow green-eyebrow">{new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase()}</div>
+                  <h1>
+                    Hello, {user.name.split(" ")[0]}{" "}
                     <span className="wave">✦</span>
                   </h1>
                   <p>Here’s what’s happening across your workspace today.</p>
@@ -2887,7 +2887,7 @@ function SalaryBreakupSection({
         rate drives normal and overtime calculations.
       </p>
       <div className="form-grid">
-        {field("Gross pay (annual)", "grossPayMinor")}
+        {field("Gross pay (Monthly)", "grossPayMinor")}
         {field("Hourly rate", "hourlyRateMinor")}
         {field("Variable pay", "variablePayMinor")}
         {field("Allowances", "allowancesMinor")}
@@ -4685,6 +4685,9 @@ function PayrollPage({
   const [items, setItems] = useState<any[]>([]),
     [summaries, setSummaries] = useState<any[]>([]),
     [salarySummarySearch, setSalarySummarySearch] = useState(""),
+    [salarySummarySort, setSalarySummarySort] = useState<{ key: string; direction: "asc" | "desc" }>({ key: "periodStart", direction: "desc" }),
+    [salarySummaryPage, setSalarySummaryPage] = useState(1),
+    [salarySummaryPageSize, setSalarySummaryPageSize] = useState(10),
     [startDate, setStartDate] = useState(
       new Date().toISOString().slice(0, 7) + "-01"
     ),
@@ -4765,6 +4768,48 @@ function PayrollPage({
       .toLowerCase();
     return searchable.includes(salarySummarySearch.trim().toLowerCase());
   });
+  const sortedSalarySummaries = [...filteredSalarySummaries].sort((a, b) => {
+    const employeeA = employees.find((e) => e.id === a.employeeId);
+    const employeeB = employees.find((e) => e.id === b.employeeId);
+    const values: Record<string, [any, any]> = {
+      employee: [a.employeeName || `${employeeA?.firstName || ""} ${employeeA?.lastName || ""}`.trim() || a.employeeId || "", b.employeeName || `${employeeB?.firstName || ""} ${employeeB?.lastName || ""}`.trim() || b.employeeId || ""],
+      period: [a.periodStart || "", b.periodStart || ""],
+      normalHours: [Number(a.normalHours) || 0, Number(b.normalHours) || 0],
+      overtimeHours: [Number(a.overtimeHours) || 0, Number(b.overtimeHours) || 0],
+      gross: [Number(a.grossMinor) || 0, Number(b.grossMinor) || 0],
+      deductions: [Number(a.deductionsMinor) || 0, Number(b.deductionsMinor) || 0],
+      net: [Number(a.netMinor) || 0, Number(b.netMinor) || 0],
+      status: [a.status || "", b.status || ""],
+    };
+    const [left, right] = values[salarySummarySort.key] || [a.periodStart || "", b.periodStart || ""];
+    const result = typeof left === "number" && typeof right === "number"
+      ? left - right
+      : String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
+    return salarySummarySort.direction === "asc" ? result : -result;
+  });
+  const salarySummaryPageCount = Math.max(1, Math.ceil(sortedSalarySummaries.length / salarySummaryPageSize));
+  const visibleSalarySummaries = sortedSalarySummaries.slice(
+    (Math.min(salarySummaryPage, salarySummaryPageCount) - 1) * salarySummaryPageSize,
+    Math.min(salarySummaryPage, salarySummaryPageCount) * salarySummaryPageSize
+  );
+  const sortSalarySummariesBy = (key: string) => {
+    setSalarySummarySort((current) => ({
+      key,
+      direction: current.key === key && current.direction === "asc" ? "desc" : "asc",
+    }));
+    setSalarySummaryPage(1);
+  };
+  const salarySummarySortHeader = (label: string, key: string) => (
+    <button
+      type="button"
+      className="table-sort-button"
+      onClick={() => sortSalarySummariesBy(key)}
+      aria-label={`Sort by ${label}`}
+      style={{ background: "transparent", border: 0, padding: "4px 0", font: "inherit", fontWeight: 600, color: "inherit", cursor: "pointer", whiteSpace: "nowrap" }}
+    >
+      {label}{salarySummarySort.key === key ? (salarySummarySort.direction === "asc" ? " ↑" : " ↓") : " ↕"}
+    </button>
+  );
   return (
     <>
       <div className="page-heading">
@@ -4868,7 +4913,7 @@ function PayrollPage({
                     aria-label="Search salary summaries"
                     placeholder="Search salary summaries…"
                     value={salarySummarySearch}
-                    onChange={(e) => setSalarySummarySearch(e.target.value)}
+                    onChange={(e) => { setSalarySummarySearch(e.target.value); setSalarySummaryPage(1); }}
                   />
                 </div>
                 <button className="secondary" onClick={load}>
@@ -4880,19 +4925,19 @@ function PayrollPage({
               <table>
                 <thead>
                   <tr>
-                    <th>Employee</th>
-                    <th>Period</th>
-                    <th>Normal hrs</th>
-                    <th>Overtime hrs</th>
-                    <th>Gross</th>
-                    <th>Deductions</th>
-                    <th>Net pay</th>
-                    <th>Status</th>
+                    <th>{salarySummarySortHeader("Employee", "employee")}</th>
+                    <th>{salarySummarySortHeader("Period", "period")}</th>
+                    <th>{salarySummarySortHeader("Normal hrs", "normalHours")}</th>
+                    <th>{salarySummarySortHeader("Overtime hrs", "overtimeHours")}</th>
+                    <th>{salarySummarySortHeader("Gross", "gross")}</th>
+                    <th>{salarySummarySortHeader("Deductions", "deductions")}</th>
+                    <th>{salarySummarySortHeader("Net pay", "net")}</th>
+                    <th>{salarySummarySortHeader("Status", "status")}</th>
                     <th>Slip</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredSalarySummaries.map((x) => (
+                  {visibleSalarySummaries.map((x) => (
                     <tr key={x.id}>
                       <td>
                         {x.employeeName ||
@@ -4941,6 +4986,26 @@ function PayrollPage({
                     : "No salary summaries yet. Calculate a period after attendance and salary breakup are configured."}
                 </div>
               )}
+            </div>
+            <div className="table-tools" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", paddingTop: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <label htmlFor="salary-summary-page-size">Rows per page</label>
+                <select
+                  id="salary-summary-page-size"
+                  value={salarySummaryPageSize}
+                  onChange={(e) => { setSalarySummaryPageSize(Number(e.target.value)); setSalarySummaryPage(1); }}
+                >
+                  <option value={10}>10</option>
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                </select>
+                <span>{sortedSalarySummaries.length ? `${(Math.min(salarySummaryPage, salarySummaryPageCount) - 1) * salarySummaryPageSize + 1}–${Math.min(salarySummaryPage, salarySummaryPageCount) * salarySummaryPageSize} of ${sortedSalarySummaries.length}` : "0 records"}</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <button className="secondary" disabled={salarySummaryPage <= 1 || !sortedSalarySummaries.length} onClick={() => setSalarySummaryPage((page) => Math.max(1, page - 1))}>Previous</button>
+                <span>Page {Math.min(salarySummaryPage, salarySummaryPageCount)} of {salarySummaryPageCount}</span>
+                <button className="secondary" disabled={salarySummaryPage >= salarySummaryPageCount || !sortedSalarySummaries.length} onClick={() => setSalarySummaryPage((page) => Math.min(salarySummaryPageCount, page + 1))}>Next</button>
+              </div>
             </div>
           </section>
         </>
