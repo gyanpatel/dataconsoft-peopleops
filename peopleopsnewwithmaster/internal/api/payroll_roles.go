@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -550,9 +551,64 @@ func (s *Server) calculatePayroll(w http.ResponseWriter, r *http.Request) {
 	}
 	start, e1 := time.Parse("2006-01-02", in.StartDate)
 	end, e2 := time.Parse("2006-01-02", in.EndDate)
-	if e1 != nil || e2 != nil || end.Before(start) || end.Sub(start) > 100*24*time.Hour {
-		writeError(w, 400, "validation_error", "Enter a valid payroll period no longer than 100 days")
+	if e1 != nil || e2 != nil || end.Before(start) || start.Day() != 1 || end.Year() != start.Year() || end.Month() != start.Month() || end.Day() != start.AddDate(0, 1, -1).Day() {
+		writeError(w, 400, "validation_error", "Payroll must cover one complete calendar month")
 		return
+	}
+
+	// Read the configured calculation steps. Formula text is configuration/documentation;
+	// calculations below are typed implementations of these reviewed business operations,
+	// never dynamically executed SQL or code.
+	algorithmRows, err := s.Store.DB.Query(r.Context(), `SELECT step_order,step_name,formula,enabled FROM dcs_salary_calculation_algorithm ORDER BY step_order`)
+	if err != nil {
+		log.Println("payroll calculation: could not load dcs_salary_calculation_algorithm:", err)
+		writeError(w, 500, "database_error", "Could not load salary calculation algorithm")
+		return
+	}
+	steps := map[int]struct {
+		name    string
+		formula string
+		enabled bool
+	}{}
+	for algorithmRows.Next() {
+		var order int
+		var name, formula string
+		var enabled bool
+		if err := algorithmRows.Scan(&order, &name, &formula, &enabled); err != nil {
+			algorithmRows.Close()
+			log.Println("payroll calculation: algorithm scan failed:", err)
+			writeError(w, 500, "database_error", "Could not read salary calculation algorithm")
+			return
+		}
+		steps[order] = struct {
+			name    string
+			formula string
+			enabled bool
+		}{name, formula, enabled}
+	}
+	if err := algorithmRows.Err(); err != nil {
+		algorithmRows.Close()
+		log.Println("payroll calculation: algorithm iteration failed:", err)
+		writeError(w, 500, "database_error", "Could not read salary calculation algorithm")
+		return
+	}
+	algorithmRows.Close()
+	expectedSteps := []struct{ name, formula string }{
+		{"Total Pay", "gross_pay_minor + variable_pay_minor + allowances_minor - deductions_minor"},
+		{"Overtime Hours", "MIN(SUM(OT check-in/check-out duration), SUM(assigned OT shift duration - break + grace minutes)) / 60"},
+		{"Overtime", "hourly_rate_minor * overtime_multiplier * OvertimeHours"},
+		{"Leave Encashment", "Terminated employees only: remaining_leave_days * 8 * hourly_rate_minor"},
+		{"Bonus", "bonus_pay_minor when bonus_month equals the payroll calendar month; otherwise 0"},
+		{"Net Pay", "TotalPay + Overtime + Bonus + LeaveEncash"},
+	}
+	for i, expected := range expectedSteps {
+		step, ok := steps[i+1]
+		formulaMatches := ok && strings.Join(strings.Fields(step.formula), " ") == strings.Join(strings.Fields(expected.formula), " ")
+		if !ok || !step.enabled || step.name != expected.name || !formulaMatches {
+			log.Println("payroll calculation: required algorithm step missing, disabled, renamed or formula changed:", i+1, expected.name, step.name, ok, step.enabled, formulaMatches)
+			writeError(w, 409, "salary_algorithm_invalid", "The configured salary algorithm is incomplete or differs from the supported payroll formulas; restore the six required calculation steps")
+			return
+		}
 	}
 	var issued int
 	if err := s.Store.DB.QueryRow(r.Context(), `SELECT COUNT(*) FROM dcs_payments WHERE period_start=$1 AND period_end=$2 AND entry_type='debit'`, start, end).Scan(&issued); err != nil {
@@ -564,6 +620,56 @@ func (s *Server) calculatePayroll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "payroll_locked", "Payments have already been issued for this period; do not recalculate a locked payroll period")
 		return
 	}
+
+	yearStart := time.Date(start.Year(), time.January, 1, 0, 0, 0, 0, time.UTC)
+	yearEnd := yearStart.AddDate(1, 0, 0)
+	nextMonth := end.AddDate(0, 0, 1)
+	query := `WITH employee_role AS (
+		SELECT e.id, e.status, e.start_date, COALESCE(role_pick.role,'') AS employee_role
+		FROM employees e
+		LEFT JOIN LATERAL (SELECT u.role FROM users u WHERE u.employee_id=e.id AND u.active=true ORDER BY CASE WHEN lower(trim(u.role))='employee' THEN 0 ELSE 1 END, u.id LIMIT 1) role_pick ON true
+		WHERE e.status='Active' OR e.status='Terminated'
+	), actual AS (
+		SELECT employee_id, COALESCE(SUM(normal_minutes),0)::bigint AS normal_minutes
+		FROM dcs_employees_actual_hours
+		WHERE work_date >= $1 AND work_date < $2 AND payment_pending=true AND approved=true
+		GROUP BY employee_id
+	), eligible_ot AS (
+		SELECT id AS employee_id FROM employee_role WHERE status='Active' AND lower(trim(employee_role))='employee'
+	), event_stream AS (
+		SELECT ae.employee_id, ae.occurred_at, ae.event_type, ae.shift_type,
+			LEAD(ae.event_type) OVER (PARTITION BY ae.employee_id ORDER BY ae.occurred_at,ae.id) AS next_type,
+			LEAD(ae.occurred_at) OVER (PARTITION BY ae.employee_id ORDER BY ae.occurred_at,ae.id) AS next_at
+		FROM attendance_events ae JOIN eligible_ot eo ON eo.employee_id=ae.employee_id
+		WHERE ae.occurred_at >= $1 AND ae.occurred_at < $2
+	), actual_ot AS (
+		SELECT employee_id, COALESCE(SUM(EXTRACT(EPOCH FROM (next_at-occurred_at))/60),0)::numeric AS minutes
+		FROM event_stream
+		WHERE event_type='check_in' AND shift_type='OT' AND next_type='check_out' AND next_at>occurred_at
+			AND next_at-occurred_at <= interval '24 hours'
+		GROUP BY employee_id
+	), assigned_ot AS (
+		SELECT sa.employee_id,
+			COALESCE(SUM(GREATEST(0, EXTRACT(EPOCH FROM ((sa.shift_date + s.end_time + CASE WHEN s.end_time <= s.start_time THEN interval '1 day' ELSE interval '0 day' END) - (sa.shift_date + s.start_time)))/60 - s.break_minutes) + s.grace_minutes),0)::numeric AS cap_minutes
+		FROM shift_assignments sa JOIN shifts s ON s.id=sa.shift_id JOIN eligible_ot eo ON eo.employee_id=sa.employee_id
+		WHERE sa.shift_date >= $1::date AND sa.shift_date < $2::date AND sa.status='Assigned' AND s.shift_type='OT'
+		GROUP BY sa.employee_id
+	)
+	SELECT er.id, er.status, er.start_date, er.employee_role,
+		COALESCE(b.gross_pay_minor,0)::bigint,
+		COALESCE(b.hourly_rate_minor,0)::bigint, COALESCE(b.overtime_multiplier,1.5)::numeric,
+		COALESCE(b.variable_pay_minor,0)::bigint, COALESCE(b.allowances_minor,0)::bigint, COALESCE(b.deductions_minor,0)::bigint,
+		COALESCE(b.bonus_pay_minor,0)::bigint, COALESCE(b.bonus_month,12)::int, COALESCE(b.currency,'AED'),
+		COALESCE(a.normal_minutes,0)::bigint,
+		LEAST(COALESCE(ot.minutes,0),COALESCE(ass.cap_minutes,0))::numeric AS capped_ot_minutes
+	FROM employee_role er JOIN employees e ON e.id=er.id
+	LEFT JOIN dsc_employee_salary_breakup b ON b.employee_id=er.id
+	LEFT JOIN actual a ON a.employee_id=er.id
+	LEFT JOIN actual_ot ot ON ot.employee_id=er.id
+	LEFT JOIN assigned_ot ass ON ass.employee_id=er.id
+	WHERE er.status='Active' OR er.status='Terminated'
+	ORDER BY e.last_name,e.first_name`
+
 	tx, err := s.Store.DB.Begin(r.Context())
 	if err != nil {
 		log.Println("payroll calculation: begin failed:", err)
@@ -571,56 +677,200 @@ func (s *Server) calculatePayroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	rows, err := tx.Query(r.Context(), `SELECT h.employee_id,COALESCE(SUM(h.normal_minutes),0),COALESCE(SUM(h.overtime_minutes),0),COALESCE(b.hourly_rate_minor,0),COALESCE(b.overtime_multiplier,1.5),COALESCE(b.variable_pay_minor,0),COALESCE(b.allowances_minor,0),COALESCE(b.deductions_minor,0),COALESCE(b.currency,'GBP') FROM dcs_employees_actual_hours h LEFT JOIN dsc_employee_salary_breakup b ON b.employee_id=h.employee_id WHERE h.work_date BETWEEN $1 AND $2 AND h.payment_pending=true AND h.approved=true GROUP BY h.employee_id,b.hourly_rate_minor,b.overtime_multiplier,b.variable_pay_minor,b.allowances_minor,b.deductions_minor,b.currency`, start, end)
+	rows, err := tx.Query(r.Context(), query, start, nextMonth)
 	if err != nil {
-		log.Println("payroll calculation: hours query failed:", err)
-		writeError(w, 500, "database_error", "Could not calculate payroll")
+		log.Println("payroll calculation: employee, salary, attendance or shift query failed:", err)
+		writeError(w, 500, "database_error", "Could not load salary, attendance and shift data for payroll")
 		return
 	}
 	type calc struct {
-		emp, currency        string
-		normal, ot           int
-		rate                 int64
-		mult                 float64
-		variable, allow, ded int64
+		emp, status, role, currency                 string
+		joinDate                                    time.Time
+		grossPay, rate, variable, allow, ded, bonus int64
+		mult                                        float64
+		bonusMonth                                  int
+		normalMinutes                               int64
+		cappedOTMinutes                             float64
+		leaveRemaining                              float64
 	}
 	list := []calc{}
 	for rows.Next() {
 		var x calc
-		if err := rows.Scan(&x.emp, &x.normal, &x.ot, &x.rate, &x.mult, &x.variable, &x.allow, &x.ded, &x.currency); err != nil {
+		if err := rows.Scan(&x.emp, &x.status, &x.joinDate, &x.role, &x.grossPay, &x.rate, &x.mult, &x.variable, &x.allow, &x.ded, &x.bonus, &x.bonusMonth, &x.currency, &x.normalMinutes, &x.cappedOTMinutes); err != nil {
 			rows.Close()
-			log.Println("payroll calculation: hours scan failed:", err)
-			writeError(w, 500, "database_error", "Could not read hours for payroll")
+			log.Println("payroll calculation: employee salary scan failed:", err)
+			writeError(w, 500, "database_error", "Could not read salary and attendance data")
+			return
+		}
+		if x.grossPay < 0 || x.variable < 0 || x.allow < 0 || x.ded < 0 || x.bonus < 0 || x.rate < 0 || x.mult < 1 || x.bonusMonth < 1 || x.bonusMonth > 12 {
+			rows.Close()
+			log.Println("payroll calculation: invalid salary configuration for employee:", x.emp)
+			writeError(w, 409, "salary_setup_invalid", "One or more employees have invalid salary configuration")
 			return
 		}
 		list = append(list, x)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		log.Println("payroll calculation: hours iteration failed:", err)
-		writeError(w, 500, "database_error", "Could not read hours for payroll")
+		log.Println("payroll calculation: employee iteration failed:", err)
+		writeError(w, 500, "database_error", "Could not read payroll employees")
 		return
 	}
 	rows.Close()
-	for _, x := range list {
-		if x.rate <= 0 {
-			log.Println("payroll calculation: employee missing positive hourly rate:", x.emp)
-			writeError(w, 400, "salary_setup_required", "Set a positive hourly rate in each employee salary breakup before calculating payroll")
-			return
+
+	// Leave encashment uses the same prorated entitlement, approved annual leave,
+	// configured weekend days and public holidays as the Leave Balance page.
+	entitlementRows, err := s.Store.DB.Query(r.Context(), `SELECT role_name,annual_days FROM dcs_leave_role_entitlements`)
+	if err != nil {
+		log.Println("payroll calculation: leave entitlement query failed:", err)
+		writeError(w, 500, "database_error", "Could not calculate leave encashment")
+		return
+	}
+	entitlements := map[string]float64{}
+	for entitlementRows.Next() {
+		var role string
+		var days float64
+		if entitlementRows.Scan(&role, &days) == nil {
+			entitlements[strings.ToLower(strings.TrimSpace(role))] = days
 		}
 	}
+	if err := entitlementRows.Err(); err != nil {
+		entitlementRows.Close()
+		log.Println("payroll calculation: leave entitlement iteration failed:", err)
+		writeError(w, 500, "database_error", "Could not calculate leave encashment")
+		return
+	}
+	entitlementRows.Close()
+	weekends := map[time.Weekday]bool{time.Saturday: true, time.Sunday: true}
+	weekendRows, err := s.Store.DB.Query(r.Context(), `SELECT weekday FROM dcs_leave_weekend_days`)
+	if err != nil {
+		log.Println("payroll calculation: weekend settings query failed:", err)
+		writeError(w, 500, "database_error", "Could not calculate leave encashment")
+		return
+	}
+	weekends = map[time.Weekday]bool{}
+	for weekendRows.Next() {
+		var d int
+		if weekendRows.Scan(&d) == nil && d >= 0 && d <= 6 {
+			weekends[time.Weekday(d)] = true
+		}
+	}
+	if err := weekendRows.Err(); err != nil {
+		weekendRows.Close()
+		log.Println("payroll calculation: weekend settings iteration failed:", err)
+		writeError(w, 500, "database_error", "Could not calculate leave encashment")
+		return
+	}
+	weekendRows.Close()
+	holidays := map[string]bool{}
+	holidayRows, err := s.Store.DB.Query(r.Context(), `SELECT holiday_date::text FROM dcs_leave_holidays WHERE holiday_date >= $1 AND holiday_date < $2`, yearStart, yearEnd)
+	if err != nil {
+		log.Println("payroll calculation: holiday query failed:", err)
+		writeError(w, 500, "database_error", "Could not calculate leave encashment")
+		return
+	}
+	for holidayRows.Next() {
+		var d string
+		if holidayRows.Scan(&d) == nil {
+			holidays[d] = true
+		}
+	}
+	if err := holidayRows.Err(); err != nil {
+		holidayRows.Close()
+		log.Println("payroll calculation: holiday iteration failed:", err)
+		writeError(w, 500, "database_error", "Could not calculate leave encashment")
+		return
+	}
+	holidayRows.Close()
+	leaveRows, err := s.Store.DB.Query(r.Context(), `SELECT employee_id,start_date,end_date FROM leave_requests WHERE status='Approved' AND lower(leave_type)='annual leave' AND start_date < $2 AND end_date >= $1`, yearStart, yearEnd)
+	if err != nil {
+		log.Println("payroll calculation: approved leave query failed:", err)
+		writeError(w, 500, "database_error", "Could not calculate leave encashment")
+		return
+	}
+	type leaveRange struct{ start, end time.Time }
+	approvedLeave := map[string][]leaveRange{}
+	for leaveRows.Next() {
+		var emp string
+		var a, b time.Time
+		if leaveRows.Scan(&emp, &a, &b) == nil {
+			approvedLeave[emp] = append(approvedLeave[emp], leaveRange{a, b})
+		}
+	}
+	if err := leaveRows.Err(); err != nil {
+		leaveRows.Close()
+		log.Println("payroll calculation: approved leave iteration failed:", err)
+		writeError(w, 500, "database_error", "Could not calculate leave encashment")
+		return
+	}
+	leaveRows.Close()
+	for i := range list {
+		x := &list[i]
+		if x.status != "Terminated" {
+			continue
+		}
+		annualDays := entitlements[strings.ToLower(strings.TrimSpace(x.role))]
+		eligibleStart := x.joinDate
+		if eligibleStart.Before(yearStart) {
+			eligibleStart = yearStart
+		}
+		eligibleDays := float64(yearEnd.Sub(eligibleStart).Hours() / 24)
+		if eligibleDays < 0 {
+			eligibleDays = 0
+		}
+		totalEntitlement := 0.0
+		if yearDays := float64(yearEnd.Sub(yearStart).Hours() / 24); yearDays > 0 {
+			totalEntitlement = roundLeave(annualDays * eligibleDays / yearDays)
+		}
+		taken := 0.0
+		for _, lr := range approvedLeave[x.emp] {
+			a, b := lr.start, lr.end
+			if a.Before(yearStart) {
+				a = yearStart
+			}
+			if b.After(yearEnd.AddDate(0, 0, -1)) {
+				b = yearEnd.AddDate(0, 0, -1)
+			}
+			for d := a; !d.After(b); d = d.AddDate(0, 0, 1) {
+				key := d.Format("2006-01-02")
+				if !weekends[d.Weekday()] && !holidays[key] {
+					taken++
+				}
+			}
+		}
+		x.leaveRemaining = roundLeave(totalEntitlement - taken)
+		if x.leaveRemaining < 0 {
+			x.leaveRemaining = 0
+		}
+	}
+
 	created := 0
 	for _, x := range list {
-		base := x.rate * int64(x.normal) / 60
-		ot := int64(float64(x.rate*int64(x.ot)) / 60 * x.mult)
-		gross := base + ot + x.variable + x.allow
-		net := gross - x.ded
-		if net < 0 {
-			net = 0
+		if x.status == "Terminated" && x.leaveRemaining <= 0 {
+			continue
 		}
-		_, err = tx.Exec(r.Context(), `INSERT INTO dcs_salary_summary(id,employee_id,period_start,period_end,currency,normal_hours,overtime_hours,base_pay_minor,overtime_pay_minor,variable_pay_minor,allowances_minor,deductions_minor,gross_minor,net_minor,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'Payment pending') ON CONFLICT(employee_id,period_start,period_end) DO UPDATE SET normal_hours=EXCLUDED.normal_hours,overtime_hours=EXCLUDED.overtime_hours,base_pay_minor=EXCLUDED.base_pay_minor,overtime_pay_minor=EXCLUDED.overtime_pay_minor,variable_pay_minor=EXCLUDED.variable_pay_minor,allowances_minor=EXCLUDED.allowances_minor,deductions_minor=EXCLUDED.deductions_minor,gross_minor=EXCLUDED.gross_minor,net_minor=EXCLUDED.net_minor,status='Payment pending',generated_at=now()`, auth.NewID(), x.emp, start, end, x.currency, float64(x.normal)/60, float64(x.ot)/60, base, ot, x.variable, x.allow, x.ded, gross, net)
+		// Step 1: TotalPay = gross_pay_minor + variable_pay_minor + allowances_minor - deductions_minor.
+		totalPay := x.grossPay + x.variable + x.allow - x.ded
+		// Step 2: cap OT event duration by assigned OT shift duration less breaks plus grace.
+		otHours := x.cappedOTMinutes / 60.0
+		// Step 3: overtime uses minor currency units/hour times multiplier times OT hours.
+		overtimePay := int64(math.Round(float64(x.rate) * x.mult * otHours))
+		// Step 4: leave is encashed only for terminated employees with a positive balance.
+		leaveEncash := int64(0)
+		if x.status == "Terminated" && x.leaveRemaining > 0 {
+			leaveEncash = int64(math.Round(x.leaveRemaining * 8 * float64(x.rate)))
+		}
+		// Step 5: bonus is included only when bonus_month matches the payroll month.
+		bonusPay := int64(0)
+		if int(start.Month()) == x.bonusMonth {
+			bonusPay = x.bonus
+		}
+		// Step 6: Net Pay = TotalPay + Overtime + Bonus + LeaveEncash.
+		netPay := totalPay + overtimePay + bonusPay + leaveEncash
+		gross := x.grossPay + x.variable + x.allow + overtimePay + bonusPay + leaveEncash
+		_, err = tx.Exec(r.Context(), `INSERT INTO dcs_salary_summary(id,employee_id,period_start,period_end,currency,normal_hours,overtime_hours,base_pay_minor,overtime_pay_minor,variable_pay_minor,allowances_minor,deductions_minor,gross_minor,net_minor,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'Payment pending') ON CONFLICT(employee_id,period_start,period_end) DO UPDATE SET currency=EXCLUDED.currency,normal_hours=EXCLUDED.normal_hours,overtime_hours=EXCLUDED.overtime_hours,base_pay_minor=EXCLUDED.base_pay_minor,overtime_pay_minor=EXCLUDED.overtime_pay_minor,variable_pay_minor=EXCLUDED.variable_pay_minor,allowances_minor=EXCLUDED.allowances_minor,deductions_minor=EXCLUDED.deductions_minor,gross_minor=EXCLUDED.gross_minor,net_minor=EXCLUDED.net_minor,status='Payment pending',generated_at=now()`, auth.NewID(), x.emp, start, end, strings.TrimSpace(x.currency), float64(x.normalMinutes)/60.0, otHours, x.grossPay, overtimePay, x.variable, x.allow, x.ded, gross, netPay)
 		if err != nil {
-			log.Println("payroll calculation: summary upsert failed:", err)
+			log.Println("payroll calculation: summary upsert failed for employee", x.emp, ":", err)
 			writeError(w, 500, "database_error", "Could not save salary summary")
 			return
 		}
@@ -631,8 +881,8 @@ func (s *Server) calculatePayroll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "database_error", "Could not save payroll calculation")
 		return
 	}
-	s.Store.Audit(r.Context(), u.ID, "payroll.calculated", "payroll", in.StartDate+"/"+in.EndDate, fmt.Sprintf("Calculated payroll summaries for %d employees", created), requestID(r))
-	writeJSON(w, 200, map[string]any{"calculatedEmployees": created, "message": "Salary summaries calculated. Review them before issuing payments."})
+	s.Store.Audit(r.Context(), u.ID, "payroll.calculated", "payroll", in.StartDate+"/"+in.EndDate, fmt.Sprintf("Calculated payroll for %d employees using configured salary algorithm", created), requestID(r))
+	writeJSON(w, 200, map[string]any{"calculatedEmployees": created, "message": "Payroll calculated using total pay, capped overtime, applicable bonus and terminated-employee leave encashment. Review summaries before issuing payments."})
 }
 
 func (s *Server) issuePayroll(w http.ResponseWriter, r *http.Request) {
