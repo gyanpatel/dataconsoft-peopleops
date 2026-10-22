@@ -1,3 +1,4 @@
+import { EmployeeSearch, BulkShiftPanel } from "./WorkflowUI";
 import * as React from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -132,7 +133,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       const j = await res.json();
       msg = j.error?.message || msg;
     } catch {}
-    throw new Error(msg);
+    throw Object.assign(new Error(msg), { status: res.status });
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -211,7 +212,7 @@ export default function App() {
       endTime: "17:00",
       breakMinutes: 30,
       graceMinutes: 5,
-      workDays: "Mon,Tue,Wed,Thu,Fri",
+      workDays: "Mon,Tue,Wed,Thu,Fri", shiftType: "NT",
     }),
     [assignmentForm, setAssignmentForm] = useState({
       shiftId: "",
@@ -349,6 +350,7 @@ export default function App() {
     setUser(null);
     setPassword("");
   }
+  const [assignTemplate, setAssignTemplate] = useState<any>(null);
   async function punch(type: "check-in" | "check-out") {
     try {
       await request(`/attendance/${type}`, { method: "POST", body: "{}" });
@@ -360,7 +362,9 @@ export default function App() {
       setToast(e instanceof Error ? e.message : "Attendance action failed");
     }
   }
+  const [decisionBusy, setDecisionBusy] = useState(false);
   async function decide(item: Leave, decision: "Approved" | "Rejected") {
+    if (decisionBusy) return; setDecisionBusy(true);
     try {
       await request(`/leave-requests/${item.id}/decision`, {
         method: "POST",
@@ -373,7 +377,7 @@ export default function App() {
       await load();
     } catch (e) {
       setToast(e instanceof Error ? e.message : "Decision failed");
-    }
+    } finally { setDecisionBusy(false); }
   }
   const filtered = useMemo(
     () =>
@@ -1190,6 +1194,7 @@ export default function App() {
                   tone="purple"
                 />
               </div>
+              {assignTemplate && <BulkShiftPanel key={assignTemplate.id} template={assignTemplate} onClose={()=>setAssignTemplate(null)} onSaved={load} />}
               <div className="shift-layout">
                 <section className="panel shift-form-panel">
                   <div className="panel-heading">
@@ -1218,7 +1223,7 @@ export default function App() {
                           endTime: "17:00",
                           breakMinutes: 30,
                           graceMinutes: 5,
-                          workDays: "Mon,Tue,Wed,Thu,Fri",
+                          workDays: "Mon,Tue,Wed,Thu,Fri", shiftType: "NT",
                         });
                         await load();
                       } catch (err) {
@@ -1230,6 +1235,7 @@ export default function App() {
                       }
                     }}
                   >
+                    <label className="field-label">Shift type<select aria-label="Shift type" value={shiftForm.shiftType} onChange={e=>setShiftForm(f=>({...f,shiftType:e.target.value}))}><option value="NT">Regular</option><option value="OT">Overtime</option></select></label>
                     <label className="field-label">
                       Shift name
                       <input
@@ -1438,8 +1444,7 @@ export default function App() {
                       <CalendarCheck size={16} /> Assign shift
                     </button>
                     <p className="form-hint">
-                      An employee can have one shift assignment per date.
-                      Duplicate assignments are rejected.
+                      Regular and overtime shifts can share a date when their times do not overlap. Conflicts are reported.
                     </p>
                   </form>
                 </section>
@@ -1454,7 +1459,7 @@ export default function App() {
                 </div>
                 <div className="shift-template-grid">
                   {shifts.map((sh: any) => (
-                    <div className="shift-template-card" key={sh.id}>
+                    <div className="shift-template-card" key={sh.id} role="button" tabIndex={0} onClick={()=>setAssignTemplate(sh)} onKeyDown={e=>{if(e.key==="Enter" || e.key===" "){e.preventDefault();setAssignTemplate(sh);}}}>
                       <div className="shift-template-top">
                         <span className="shift-icon">
                           <Clock3 size={17} />
@@ -1467,7 +1472,7 @@ export default function App() {
                           {sh.active ? "Active" : "Inactive"}
                         </span>
                       </div>
-                      <h4>{sh.name}</h4>
+                      <h4>{sh.name}</h4><span className="status status-pending">{sh.shiftType === "OT" ? "Overtime" : "Regular"}</span>
                       <div className="shift-time">
                         {sh.startTime} <ArrowRight size={14} /> {sh.endTime}
                       </div>
@@ -1730,7 +1735,7 @@ export default function App() {
           )}
           {page === "Leave Balance" && <LeaveBalancePage user={user} />}
           {page === "Leave management" && (
-            <LeavePage
+            <LeavePage onChanged={load}
               leaves={leaves}
               onNew={() => setModal("leave")}
               onReview={(l) => {
@@ -1761,6 +1766,7 @@ export default function App() {
                   </span>
                 </div>
                 <LeaveTable
+              onChanged={load}
                   leaves={leaves}
                   onReview={(l) => {
                     setSelectedLeave(l);
@@ -2072,12 +2078,13 @@ export default function App() {
                 fields={employeeFields}
                 employees={employees}
                 initial={selectedEmployee}
+                permissions={user.permissions || []}
                 onCancel={() => setModal("employee-details")}
                 onSave={async (data) => {
                   try {
-                    await request(`/employees/${selectedEmployee.id}`, {
+                    await request(`/employees/${selectedEmployee.id}${user.permissions?.includes("employees.manage") ? "" : "/financials"}`, {
                       method: "PUT",
-                      body: JSON.stringify(data),
+                      body: JSON.stringify(user.permissions?.includes("employees.manage") ? data : {salary:data.salary,bank:data.bank}),
                     });
                     setModal("");
                     setSelectedEmployee(null);
@@ -2157,15 +2164,13 @@ export default function App() {
                   <div className="action-pair">
                     <button
                       className="danger-btn"
-                      disabled={!isApprover}
-                      onClick={() => decide(selectedLeave, "Rejected")}
+                      disabled={!isApprover || decisionBusy} onClick={() => decide(selectedLeave, "Rejected")}
                     >
                       <XCircle size={15} /> Reject
                     </button>
                     <button
                       className="primary"
-                      disabled={!isApprover}
-                      onClick={() => decide(selectedLeave, "Approved")}
+                      disabled={!isApprover || decisionBusy} onClick={() => decide(selectedLeave, "Approved")}
                     >
                       <CheckCircle2 size={15} /> Approve
                     </button>
@@ -2679,9 +2684,9 @@ function EmployeeDetails({
         <button className="secondary" onClick={onClose}>
           Close
         </button>
-        <button className="primary" onClick={onEdit}>
+        {(permissions.includes("employees.manage") || permissions.includes("hr.payroll.read")) && <button className="primary" onClick={onEdit}>
           Edit employee <ArrowRight size={15} />
-        </button>
+        </button>}
       </div>
     </div>
   );
@@ -2689,18 +2694,34 @@ function EmployeeDetails({
 function LeaveTable({
   leaves,
   onReview,
-  isApprover,
+  isApprover, onChanged,
 }: {
   leaves: Leave[];
   onReview: (l: Leave) => void;
-  isApprover: boolean;
+  isApprover: boolean; onChanged?: () => void;
 }) {
+  const [selected, setSelected] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const [results, setResults] = useState<any[]>([]);
+  const eligible = leaves.filter(l => l.status === "Pending");
+  useEffect(() => { setSelected(ids => ids.filter(id => leaves.some(l => l.id === id && l.status === "Pending"))); }, [leaves]);
+  async function decideSelected(decision: string) {
+    setBusy(true); setResults([]);
+    try { const result = await request<any>("/leave-requests/bulk-decision", {method:"POST",body:JSON.stringify({ids:selected,decision,note})});
+      setResults(result.results); setSelected([]); onChanged?.();
+    } catch(e) { setResults([{id:"error",ok:false,message:e instanceof Error?e.message:"Decision failed"}]); }
+    finally { setBusy(false); }
+  }
   return (
     <div className="table-wrap">
+      {isApprover && <div className="bulk-toolbar"><b>{selected.length} selected</b><input aria-label="Decision note" placeholder="Decision note" value={note} maxLength={1000} onChange={e=>setNote(e.target.value)}/><button className="primary" disabled={busy || !selected.length} onClick={()=>decideSelected("Approved")}>Approve selected</button><button className="danger-btn" disabled={busy || !selected.length} onClick={()=>decideSelected("Rejected")}>Reject selected</button></div>}
+      {results.length>0 && <div role="status" className="batch-results">{results.map(x=><p key={x.id}>{leaves.find(l=>l.id===x.id)?.employeeName || x.id}: {x.message}</p>)}</div>}
       <table>
         <thead>
           <tr>
-            <th>Employee</th>
+            {isApprover && <th><input aria-label="Select pending requests on this page" type="checkbox" disabled={busy} checked={eligible.length>0 && eligible.every(l=>selected.includes(l.id))} onChange={e=>setSelected(e.target.checked?eligible.map(l=>l.id):[])}/></th>}
+            <th>Employee / request</th>
             <th>Leave type</th>
             <th>Dates</th>
             <th>Duration</th>
@@ -2711,8 +2732,9 @@ function LeaveTable({
         <tbody>
           {leaves.map((l) => (
             <tr key={l.id}>
+              {isApprover && <td><input type="checkbox" aria-label={`Select request ${l.id}`} disabled={busy || l.status!=="Pending"} checked={selected.includes(l.id)} onChange={e=>setSelected(ids=>e.target.checked?[...ids,l.id]:ids.filter(id=>id!==l.id))}/></td>}
               <td>
-                <b>{l.employeeName}</b>
+                <b>{l.employeeName}</b><small className="subcell" title={l.id}>Request {l.id.slice(-8)}</small>
                 <small className="subcell">{l.reason}</small>
               </td>
               <td>{l.leaveType}</td>
@@ -2755,12 +2777,12 @@ function LeaveTable({
   );
 }
 function LeavePage({
-  leaves,
+  leaves, onChanged,
   onNew,
   onReview,
   isApprover,
 }: {
-  leaves: Leave[];
+  leaves: Leave[]; onChanged?: () => void;
   onNew: () => void;
   onReview: (l: Leave) => void;
   isApprover: boolean;
@@ -2807,7 +2829,7 @@ function LeavePage({
             <p>Requests and decision history</p>
           </div>
         </div>
-        <LeaveTable
+        <LeaveTable onChanged={onChanged}
           leaves={leaves}
           onReview={onReview}
           isApprover={isApprover}
@@ -2821,17 +2843,17 @@ function SalaryBreakupSection({
   employeeId,
   role,
   permissions = [],
-  onToast,
+  onToast, editing = false, onDraft,
 }: {
+  editing?: boolean; onDraft?: (data: any) => void;
   employeeId: string;
   role: string;
   permissions?: string[];
   onToast: (s: string) => void;
 }) {
   const allowed =
-    permissions.includes("hr.payroll.read") ||
-    permissions.includes("payroll.manage");
-  const [data, setData] = useState<any>({
+    editing && permissions.includes("hr.payroll.read");
+  const [data, loadData] = useState<any>({
     grossPayMinor: 0,
     hourlyRateMinor: 0,
     overtimeMultiplier: 1.5,
@@ -2841,26 +2863,14 @@ function SalaryBreakupSection({
     currency: appCurrency,
     effectiveFrom: new Date().toISOString().slice(0, 10),
   });
-  const [busy, setBusy] = useState(false);
+  const setData = (next: any) => { loadData(next); onDraft?.(next); };
+  const [loadError, setLoadError] = useState("");
+  const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     request<any>(`/employees/${employeeId}/salary-breakup`)
-      .then(setData)
-      .catch(() => {});
+      .then(loadData)
+      .catch((e) => { if (e.status !== 404) setLoadError(e.message); }).finally(() => setLoaded(true));
   }, [employeeId]);
-  async function save() {
-    setBusy(true);
-    try {
-      await request(`/employees/${employeeId}/salary-breakup`, {
-        method: "PUT",
-        body: JSON.stringify(data),
-      });
-      onToast("Salary breakup saved");
-    } catch (e) {
-      onToast(e instanceof Error ? e.message : "Could not save salary breakup");
-    } finally {
-      setBusy(false);
-    }
-  }
   const field = (label: string, key: string) => (
     <label>
       {label}
@@ -2868,7 +2878,7 @@ function SalaryBreakupSection({
         type="number"
         min="0"
         step="0.01"
-        disabled={!allowed}
+        disabled={!allowed || !loaded || !!loadError}
         value={Number(data[key] || 0) / 100}
         onChange={(e) =>
           setData({
@@ -2881,7 +2891,7 @@ function SalaryBreakupSection({
   );
   return (
     <section className="employee-bank">
-      <h4>Salary breakup</h4>
+      <h4>Salary breakup</h4>{loadError && <p role="alert" className="error-banner">{loadError}</p>}
       <p>
         Amounts are entered in currency units and stored in minor units. Hourly
         rate drives normal and overtime calculations.
@@ -2899,7 +2909,7 @@ function SalaryBreakupSection({
             min="1"
             max="5"
             step="0.25"
-            disabled={!allowed}
+            disabled={!allowed || !loaded || !!loadError}
             value={data.overtimeMultiplier ?? 1.5}
             onChange={(e) =>
               setData({ ...data, overtimeMultiplier: Number(e.target.value) })
@@ -2910,16 +2920,16 @@ function SalaryBreakupSection({
           Currency
           <input
             maxLength={3}
-            disabled={!allowed}
-            value={appCurrency}
-            onChange={() => setData({ ...data, currency: appCurrency })}
+            disabled={!allowed || !loaded || !!loadError}
+            value={data.currency || appCurrency}
+            onChange={(e) => setData({ ...data, currency: e.target.value.toUpperCase() })}
           />
         </label>
         <label>
           Effective from
           <input
             type="date"
-            disabled={!allowed}
+            disabled={!allowed || !loaded || !!loadError}
             value={String(data.effectiveFrom || "").slice(0, 10)}
             onChange={(e) =>
               setData({ ...data, effectiveFrom: e.target.value })
@@ -2927,13 +2937,7 @@ function SalaryBreakupSection({
           />
         </label>
       </div>
-      {allowed && (
-        <div className="modal-actions">
-          <button className="primary" disabled={busy} onClick={save}>
-            {busy ? "Saving…" : "Save salary breakup"}
-          </button>
-        </div>
-      )}
+
     </section>
   );
 }
@@ -2942,17 +2946,17 @@ function BankDetailsSection({
   employeeId,
   role,
   permissions = [],
-  onToast,
+  onToast, editing = false, onDraft,
 }: {
+  editing?: boolean; onDraft?: (data: any) => void;
   employeeId: string;
   role: string;
   permissions?: string[];
   onToast: (s: string) => void;
 }) {
   const canEdit =
-    permissions.includes("hr.payroll.read") ||
-    permissions.includes("payroll.manage");
-  const [data, setData] = useState<any>({
+    editing && permissions.includes("hr.payroll.read");
+  const [data, loadData] = useState<any>({
     accountName: "",
     bankName: "",
     sortCode: "",
@@ -2960,46 +2964,28 @@ function BankDetailsSection({
     iban: "",
     bicSwift: "",
   });
+  const setData = (next: any) => { loadData(next); onDraft?.(next); };
+  const [loadError, setLoadError] = useState("");
   const [loaded, setLoaded] = useState(false),
-    [busy, setBusy] = useState(false),
     [sortCodeLabel, setSortCodeLabel] = useState("Sort Code"),
     [bankFieldConfig, setBankFieldConfig] = useState<Record<string, any>>({});
   useEffect(() => {
     request<any>("/app-master?page=bank-details").then((x) => { const config: Record<string, any> = {}; for (const field of x.items || []) config[field.fieldKey] = field; setBankFieldConfig(config); const field = config.sortCode; if (field?.label) setSortCodeLabel(field.label); }).catch(() => {});
     request<any>(`/employees/${employeeId}/bank-details`)
-      .then((x) => setData({ ...data, ...x }))
-      .catch(() => {})
+      .then((x) => loadData({ ...data, ...x }))
+      .catch((e) => { if (e.status !== 404) setLoadError(e.message); })
       .finally(() => setLoaded(true));
   }, [employeeId]);
-  async function save() {
-    setBusy(true);
-    try {
-      const payload = { ...data };
-      if (payload.accountNumber.includes("*")) delete payload.accountNumber;
-      if (payload.iban.includes("*")) delete payload.iban;
-      await request(`/employees/${employeeId}/bank-details`, {
-        method: "PUT",
-        body: JSON.stringify(payload),
-      });
-      onToast("Bank details saved securely");
-      const fresh = await request<any>(`/employees/${employeeId}/bank-details`);
-      setData(fresh);
-    } catch (e) {
-      onToast(e instanceof Error ? e.message : "Could not save bank details");
-    } finally {
-      setBusy(false);
-    }
-  }
   if (!loaded)
     return (
       <div className="employee-bank">
-        <h4>Bank details</h4>
+        <h4>Bank details</h4>{loadError && <p role="alert" className="error-banner">{loadError}</p>}
         <p>Loading secure bank details…</p>
       </div>
     );
   return (
     <section className="employee-bank">
-      <h4>Bank details</h4>
+      <h4>Bank details</h4>{loadError && <p role="alert" className="error-banner">{loadError}</p>}
       <p>
         Account number and IBAN are encrypted at rest. Only authorised HR and
         Accounts users can view the full values.
@@ -3008,7 +2994,7 @@ function BankDetailsSection({
         <label>
           Account name
           <input
-            disabled={!canEdit}
+            disabled={!canEdit || !!loadError}
             minLength={bankFieldConfig.accountName?.minLength ?? undefined}
             maxLength={bankFieldConfig.accountName?.maxLength ?? undefined}
             value={data.accountName || ""}
@@ -3018,7 +3004,7 @@ function BankDetailsSection({
         <label>
           Bank name
           <input
-            disabled={!canEdit}
+            disabled={!canEdit || !!loadError}
             minLength={bankFieldConfig.bankName?.minLength ?? undefined}
             maxLength={bankFieldConfig.bankName?.maxLength ?? undefined}
             value={data.bankName || ""}
@@ -3028,7 +3014,7 @@ function BankDetailsSection({
         <label>
           {sortCodeLabel}
           <input
-            disabled={!canEdit}
+            disabled={!canEdit || !!loadError}
             minLength={bankFieldConfig.sortCode?.minLength ?? undefined}
             maxLength={bankFieldConfig.sortCode?.maxLength ?? undefined}
             value={data.sortCode || ""}
@@ -3038,7 +3024,7 @@ function BankDetailsSection({
         <label>
           Account number
           <input
-            disabled={!canEdit}
+            disabled={!canEdit || !!loadError}
             minLength={bankFieldConfig.accountNumber?.minLength ?? undefined}
             maxLength={bankFieldConfig.accountNumber?.maxLength ?? undefined}
             value={data.accountNumber || ""}
@@ -3052,7 +3038,7 @@ function BankDetailsSection({
         <label>
           IBAN
           <input
-            disabled={!canEdit}
+            disabled={!canEdit || !!loadError}
             minLength={bankFieldConfig.iban?.minLength ?? undefined}
             maxLength={bankFieldConfig.iban?.maxLength ?? undefined}
             value={data.iban || ""}
@@ -3063,7 +3049,7 @@ function BankDetailsSection({
         <label>
           BIC / SWIFT
           <input
-            disabled={!canEdit}
+            disabled={!canEdit || !!loadError}
             minLength={bankFieldConfig.bicSwift?.minLength ?? undefined}
             maxLength={bankFieldConfig.bicSwift?.maxLength ?? undefined}
             value={data.bicSwift || ""}
@@ -3071,13 +3057,7 @@ function BankDetailsSection({
           />
         </label>
       </div>
-      {canEdit && (
-        <div className="modal-actions">
-          <button className="primary" disabled={busy} onClick={save}>
-            {busy ? "Saving…" : "Save bank details"}
-          </button>
-        </div>
-      )}
+
     </section>
   );
 }
@@ -3087,14 +3067,16 @@ function EmployeeForm({
   employees = [],
   onCancel,
   onSave,
-  initial,
+  initial, permissions = [],
 }: {
   fields: any[];
   employees?: Employee[];
   onCancel: () => void;
   onSave: (x: any) => void;
-  initial?: Employee;
+  initial?: Employee; permissions?: string[];
 }) {
+  const [salaryDraft, setSalaryDraft] = useState<any>();
+  const [bankDraft, setBankDraft] = useState<any>();
   const defaults: Record<string, any> = {
     firstName: "",
     lastName: "",
@@ -3239,7 +3221,7 @@ function EmployeeForm({
               v[f.fieldKey] === null ||
               String(v[f.fieldKey]).trim() === "")
         );
-        if (missing.length) {
+        if (missing.length && (!initial || permissions.includes("employees.manage"))) {
           setFormError("Complete these required fields: " + missing.map((f: any) => f.label).join(", "));
           return;
         }
@@ -3248,10 +3230,10 @@ function EmployeeForm({
           const length = String(v[f.fieldKey]).length;
           return (f.minLength != null && length < Number(f.minLength)) || (f.maxLength != null && length > Number(f.maxLength));
         });
-        if (invalidLength) { setFormError(`${invalidLength.label} must be ${invalidLength.minLength != null ? `at least ${invalidLength.minLength}` : ""}${invalidLength.minLength != null && invalidLength.maxLength != null ? " and " : ""}${invalidLength.maxLength != null ? `no more than ${invalidLength.maxLength}` : ""} characters.`); return; }
+        if (invalidLength && (!initial || permissions.includes("employees.manage"))) { setFormError(`${invalidLength.label} must be ${invalidLength.minLength != null ? `at least ${invalidLength.minLength}` : ""}${invalidLength.minLength != null && invalidLength.maxLength != null ? " and " : ""}${invalidLength.maxLength != null ? `no more than ${invalidLength.maxLength}` : ""} characters.`); return; }
         setBusy(true);
         try {
-          const customFields: Record<string, any> = {};
+          const customFields: Record<string, any> = { ...(initial?.customFields || {}) };
           for (const f of renderFields) {
             if (!standard.has(f.fieldKey))
               customFields[f.fieldKey] =
@@ -3282,6 +3264,7 @@ function EmployeeForm({
             customFields,
             photoData,
             photoName,
+            salary: salaryDraft, bank: bankDraft,
           });
         } catch (err) {
           setFormError(
@@ -3292,6 +3275,7 @@ function EmployeeForm({
         }
       }}
     >
+      <fieldset className="employee-profile-fields" disabled={!!initial && !permissions.includes("employees.manage")}>
       <div className="profile-photo-picker">
         <div className="avatar avatar-large avatar-photo">
           {photoData ? (
@@ -3477,12 +3461,17 @@ function EmployeeForm({
         Fields are configured by an authorised administrator. Additional fields
         are stored with the employee record in PostgreSQL.
       </p>
+      </fieldset>
+      {initial && permissions.includes("hr.payroll.read") && <>
+        <SalaryBreakupSection employeeId={initial.id} role="" permissions={permissions} onToast={() => {}} editing onDraft={setSalaryDraft} />
+        <BankDetailsSection employeeId={initial.id} role="" permissions={permissions} onToast={() => {}} editing onDraft={setBankDraft} />
+      </>}
       <div className="modal-actions">
         <button type="button" className="secondary" onClick={onCancel}>
           Cancel
         </button>
         <button className="primary" disabled={busy}>
-          {busy ? "Saving…" : initial ? "Save changes" : "Create employee"}{" "}
+          {busy ? "Saving…" : initial ? "Save all changes" : "Create employee"}{" "}
           <ArrowRight size={15} />
         </button>
       </div>
@@ -3511,6 +3500,19 @@ function LeaveForm({
     // Never infer self-vs-other from an empty employee selection.
     employeeId: "self",
   });
+  const [durationError, setDurationError] = useState("");
+  const [durationBusy, setDurationBusy] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setV(current => ({...current, days: 0})); setDurationError("");
+    if (!v.startDate || !v.endDate) { setDurationBusy(false); return; }
+    setDurationBusy(true);
+    request<any>(`/leave-requests/duration?startDate=${v.startDate}&endDate=${v.endDate}`)
+      .then(result => { if (!cancelled) setV(current => ({...current, days: result.days})); })
+      .catch(e => { if (!cancelled) setDurationError(e.message); })
+      .finally(() => { if (!cancelled) setDurationBusy(false); });
+    return () => { cancelled = true; };
+  }, [v.startDate, v.endDate, v.leaveType, v.employeeId]);
   const [employeeSearch, setEmployeeSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const employeeMatches = employees.filter((e) => `${e.firstName} ${e.lastName} ${e.employeeNumber} ${e.email}`.toLowerCase().includes(employeeSearch.toLowerCase())).slice(0, 8);
@@ -3601,11 +3603,12 @@ function LeaveForm({
             max="365"
             step="0.5"
             value={v.days}
-            onChange={(e) => setV({ ...v, days: Number(e.target.value) })}
+            readOnly aria-describedby="leave-duration-help"
             required
           />
         </label>
       </div>
+      <p id="leave-duration-help" className="form-hint">{durationBusy ? "Calculating…" : durationError || "Working days, excluding configured weekends and holidays."}</p>
       <label>
         Reason
         <textarea
@@ -3620,7 +3623,7 @@ function LeaveForm({
         <button type="button" className="secondary" onClick={onCancel}>
           Cancel
         </button>
-        <button className="primary" disabled={busy}>
+        <button className="primary" disabled={busy || durationBusy || !!durationError || v.days <= 0}>
           {busy ? "Submitting…" : "Submit request"} <ArrowRight size={15} />
         </button>
       </div>
@@ -3987,7 +3990,7 @@ function DocumentsPage({
   onToast: (s: string) => void;
 }) {
   type UploadRow = { key: string; file: File | null; documentType: string; issueDate: string; expiryDate: string; notes: string };
-  const [employeeId, setEmployeeId] = useState(user.employeeId || ""),
+  const [employeeId, setEmployeeId] = useState(user.permissions?.includes("documents.manage") ? "" : user.employeeId || ""),
     [documentTypes, setDocumentTypes] = useState<string[]>([]),
     [rows, setRows] = useState<UploadRow[]>([{ key: crypto.randomUUID(), file: null, documentType: "", issueDate: "", expiryDate: "", notes: "" }]),
     [busy, setBusy] = useState(false);
@@ -4014,6 +4017,7 @@ function DocumentsPage({
   }
   async function upload(e: React.FormEvent) {
     e.preventDefault();
+    if (canManage && !employeeId) { onToast("Select an employee from the search results"); return; }
     const incomplete = rows.find((row) => !row.file || !row.documentType);
     if (incomplete) { onToast("Choose a file and document type for every document row"); return; }
     if (rows.some((row) => row.issueDate && row.expiryDate && row.expiryDate < row.issueDate)) { onToast("Expiry date cannot be earlier than issue date"); return; }
@@ -4056,7 +4060,7 @@ function DocumentsPage({
       {canUpload && <section className="panel directory-panel">
         <div className="panel-heading"><div><h3>Upload documents</h3><p>PDF, PNG, JPG, DOCX, XLSX or TXT · Maximum 15 MB per file.</p></div><button type="button" className="secondary" onClick={addRow}>+ Add document</button></div>
         <form className="modal-form" onSubmit={upload}>
-          <div className="form-grid"><label>Employee<select required disabled={!canManage} value={canManage ? employeeId : user.employeeId || ""} onChange={(e) => setEmployeeId(e.target.value)}><option value="">Select employee</option>{employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.firstName} {employee.lastName} · {employee.employeeNumber}</option>)}</select></label></div>
+          <div className="form-grid"><label>Employee{canManage ? <EmployeeSearch value={employeeId} onChange={setEmployeeId} /> : <span>Your documents</span>}</label></div>
           <div className="document-upload-list">
             {rows.map((row, index) => <section className="document-upload-row" key={row.key}>
               <div className="document-upload-row-heading"><strong>Document {index + 1}</strong>{rows.length > 1 && <button type="button" className="danger-btn" onClick={() => removeRow(row.key)}>Remove</button>}</div>
@@ -4316,24 +4320,10 @@ function RoleAccessPage({ onToast }: { onToast: (s: string) => void }) {
     [edit, setEdit] = useState<any | null>(null),
     [busy, setBusy] = useState(false),
     [err, setErr] = useState("");
-  const pageList = [
-    ["dashboard", "Dashboard"],
-    ["employees", "Employees"],
-    ["salary-breakup", "Salary breakup"],
-    ["bank-details", "Bank details"],
-    ["employee-hierarchy", "Employee hierarchy"],
-    ["attendance", "Attendance"],
-    ["shift-management", "Shift management"],
-    ["shift-assignments", "Shift assignments"],
-    ["leave-management", "Leave management"],
-    ["payroll", "Payroll"],
-    ["documents", "Documents"],
-    ["approvals", "Approvals"],
-    ["reports-analytics", "Reports & analytics"],
-    ["audit-log", "Audit log"],
-    ["settings", "Settings"],
-    ["my-profile", "My profile"],
-  ];
+  const [pageList, setPageList] = useState<string[][]>([]);
+  const [actions, setActions] = useState<any[]>([]);
+  useEffect(() => { request<any>("/module-catalog").then(r=>setPageList(r.items)).catch(e=>setErr(e.message)); }, []);
+  function selectRole(id: string) { setPages([]); setActions([]); setSelected(id); }
   async function loadRoles() {
     try {
       const r = await request<any>("/roles");
@@ -4343,12 +4333,15 @@ function RoleAccessPage({ onToast }: { onToast: (s: string) => void }) {
       setErr(e instanceof Error ? e.message : "Could not load roles");
     }
   }
+  const roleLoadVersion = React.useRef(0);
   async function loadPages(roleId: string) {
-    if (!roleId) return;
+    const version = ++roleLoadVersion.current;
+    if (!roleId || !pageList.length) return;
     try {
       const r = await request<any>(
         `/role-pages?roleId=${encodeURIComponent(roleId)}`
       );
+      const actionData = await request<any>(`/role-permissions?roleId=${encodeURIComponent(roleId)}`); if (version !== roleLoadVersion.current) return; setActions(actionData.items || []);
       const existing = new Map((r.items || []).map((p: any) => [p.pageId, p]));
       setPages(
         pageList.map(([pageId, pageName]) => ({
@@ -4358,7 +4351,7 @@ function RoleAccessPage({ onToast }: { onToast: (s: string) => void }) {
         }))
       );
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Could not load page access");
+      setErr(e instanceof Error ? e.message : "Could not load module availability");
     }
   }
   useEffect(() => {
@@ -4366,7 +4359,7 @@ function RoleAccessPage({ onToast }: { onToast: (s: string) => void }) {
   }, []);
   useEffect(() => {
     loadPages(selected);
-  }, [selected]);
+  }, [selected, pageList]);
   async function saveRole() {
     if (!edit) return;
     setBusy(true);
@@ -4397,9 +4390,9 @@ function RoleAccessPage({ onToast }: { onToast: (s: string) => void }) {
         method: "PUT",
         body: JSON.stringify({ roleId: selected, pages }),
       });
-      onToast("Page access saved. It applies on next sign-in.");
+      onToast("Module availability saved. Refresh your session to update navigation.");
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Could not save page access");
+      setErr(e instanceof Error ? e.message : "Could not save module availability");
     } finally {
       setBusy(false);
     }
@@ -4421,7 +4414,7 @@ function RoleAccessPage({ onToast }: { onToast: (s: string) => void }) {
       <div className="page-heading">
         <div>
           <div className="eyebrow green-eyebrow">ACCESS CONTROL</div>
-          <h1>Roles & page access</h1>
+          <h1>Roles & Permissions</h1>
           <p>
             Maintain available roles and configure which application pages each
             role can see after sign-in.
@@ -4442,7 +4435,7 @@ function RoleAccessPage({ onToast }: { onToast: (s: string) => void }) {
           <div>
             <h3>Available roles</h3>
             <p>
-              Stored in <code>dcs_app_roles</code>. Built-in system roles are
+              Select a role to configure its modules. Built-in system roles are
               protected from removal.
             </p>
           </div>
@@ -4460,9 +4453,9 @@ function RoleAccessPage({ onToast }: { onToast: (s: string) => void }) {
             </thead>
             <tbody>
               {roles.map((r) => (
-                <tr key={r.id}>
+                <tr key={r.id} className={selected === r.id ? "selected-row" : ""}>
                   <td>
-                    <b>{r.roleName}</b>
+                    <button type="button" className="role-name-button" aria-pressed={selected === r.id} onClick={()=>selectRole(r.id)}>{r.roleName}</button>
                     {r.systemRole && (
                       <small className="subcell">System role</small>
                     )}
@@ -4472,9 +4465,9 @@ function RoleAccessPage({ onToast }: { onToast: (s: string) => void }) {
                   <td>
                     <button
                       className="review-btn"
-                      onClick={() => setSelected(r.id)}
+                      onClick={() => selectRole(r.id)}
                     >
-                      Configure pages
+                      Configure modules
                     </button>
                   </td>
                   <td>
@@ -4502,7 +4495,7 @@ function RoleAccessPage({ onToast }: { onToast: (s: string) => void }) {
       <section className="panel directory-panel">
         <div className="panel-heading">
           <div>
-            <h3>Page availability</h3>
+            <h3>Available Modules</h3>
             <p>
               {roles.find((r) => r.id === selected)?.roleName ||
                 "Select a role"}{" "}
@@ -4511,7 +4504,7 @@ function RoleAccessPage({ onToast }: { onToast: (s: string) => void }) {
           </div>
           <select
             value={selected}
-            onChange={(e) => setSelected(e.target.value)}
+            onChange={(e) => selectRole(e.target.value)}
           >
             {roles.map((r) => (
               <option value={r.id} key={r.id}>
@@ -4543,12 +4536,16 @@ function RoleAccessPage({ onToast }: { onToast: (s: string) => void }) {
         <div className="modal-actions">
           <button
             className="primary"
-            disabled={busy || !selected}
+            disabled={busy || !selected || !pages.length}
             onClick={savePages}
           >
-            Save page access
+            Save module availability
           </button>
         </div>
+      </section>
+      <section className="panel directory-panel"><div className="panel-heading"><div><h3>Allowed Actions</h3><p>Actions are separate from module visibility. Changes apply after refreshing the session.</p></div></div>
+        <div className="role-page-grid">{actions.map(action=><label className="check-label" key={action.key}><input type="checkbox" checked={action.enabled} disabled={['Master Admin','Super Admin'].includes(roles.find(r=>r.id===selected)?.roleName) || ['roles.manage','app.configure'].includes(action.key)} onChange={e=>setActions(items=>items.map(x=>x.key===action.key?{...x,enabled:e.target.checked}:x))}/>{action.key.replace(/\./g, ' · ').replace(/_/g,' ')}</label>)}</div>
+        <div className="modal-actions"><button className="primary" disabled={busy || !selected || !actions.length || ['Master Admin','Super Admin'].includes(roles.find(r=>r.id===selected)?.roleName)} onClick={async()=>{setBusy(true);try{await request('/role-permissions',{method:'PUT',body:JSON.stringify({roleId:selected,items:actions})});onToast('Allowed actions saved');}catch(e){setErr(e instanceof Error?e.message:'Could not save actions');}finally{setBusy(false);}}}>Save allowed actions</button></div>
       </section>
       {edit && (
         <div className="modal-backdrop">
