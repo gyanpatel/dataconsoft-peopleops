@@ -73,6 +73,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/documents/{id}/decision", s.protected(http.HandlerFunc(s.documentDecision)))
 	mux.Handle("POST /api/v1/employees", s.protected(http.HandlerFunc(s.createEmployee)))
 	mux.Handle("PUT /api/v1/employees/{id}", s.protected(http.HandlerFunc(s.updateEmployee)))
+	mux.Handle("PUT /api/v1/employees/{id}/financials", s.protected(http.HandlerFunc(s.updateEmployeeFinancials)))
 	mux.Handle("GET /api/v1/employees/{id}/photo", s.protected(http.HandlerFunc(s.employeePhoto)))
 	mux.Handle("GET /api/v1/attendance", s.protected(http.HandlerFunc(s.attendance)))
 	mux.Handle("GET /api/v1/shifts", s.protected(http.HandlerFunc(s.shifts)))
@@ -87,6 +88,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/leave-balances", s.protected(http.HandlerFunc(s.leaveBalances)))
 	mux.Handle("POST /api/v1/leave-balances", s.protected(http.HandlerFunc(s.leaveBalances)))
 	mux.Handle("PUT /api/v1/leave-balances", s.protected(http.HandlerFunc(s.leaveBalances)))
+	mux.Handle("GET /api/v1/leave-requests/duration", s.protected(http.HandlerFunc(s.leaveDuration)))
+	mux.Handle("POST /api/v1/leave-requests/bulk-decision", s.protected(http.HandlerFunc(s.bulkLeaveDecision)))
+	mux.Handle("POST /api/v1/shift-assignments/bulk", s.protected(http.HandlerFunc(s.bulkShiftAssignments)))
+	mux.Handle("GET /api/v1/module-catalog", s.protected(http.HandlerFunc(s.moduleCatalog)))
+	mux.Handle("GET /api/v1/role-permissions", s.protected(http.HandlerFunc(s.rolePermissions)))
+	mux.Handle("PUT /api/v1/role-permissions", s.protected(http.HandlerFunc(s.rolePermissions)))
 	mux.Handle("GET /api/v1/leave-requests", s.protected(http.HandlerFunc(s.leaveRequests)))
 	mux.Handle("POST /api/v1/leave-requests", s.protected(http.HandlerFunc(s.createLeave)))
 	mux.Handle("POST /api/v1/leave-requests/{id}/decision", s.protected(http.HandlerFunc(s.leaveDecision)))
@@ -409,7 +416,7 @@ func (s *Server) employees(w http.ResponseWriter, r *http.Request) {
 	if v, e := strconv.Atoi(r.URL.Query().Get("limit")); e == nil && v > 0 && v <= 200 {
 		limit = v
 	}
-	rows, e := s.Store.DB.Query(s.Store.Ctx, `SELECT id,employee_number,first_name,last_name,email,department,job_title,location,employment_type,status,start_date,custom_fields,COALESCE(photo_document_id, ''),COALESCE(manager_id,''),COALESCE((SELECT first_name||' '||last_name FROM employees m WHERE m.id=employees.manager_id),''),COALESCE((SELECT u.role FROM users u WHERE u.employee_id=employees.id AND u.active=true ORDER BY u.id LIMIT 1),'') FROM employees WHERE ($1='' OR first_name LIKE $2 OR last_name LIKE $3 OR email LIKE $4 OR employee_number LIKE $5 OR department LIKE $6) ORDER BY last_name,first_name LIMIT $7`, q, like, like, like, like, like, limit)
+	rows, e := s.Store.DB.Query(s.Store.Ctx, `SELECT id,employee_number,first_name,last_name,email,department,job_title,location,employment_type,status,start_date,custom_fields,COALESCE(photo_document_id, ''),COALESCE(manager_id,''),COALESCE((SELECT first_name||' '||last_name FROM employees m WHERE m.id=employees.manager_id),''),COALESCE((SELECT u.role FROM users u WHERE u.employee_id=employees.id AND u.active=true ORDER BY u.id LIMIT 1),'') FROM employees WHERE ($1='' OR (first_name || ' ' || last_name) ILIKE $2 OR last_name ILIKE $3 OR email ILIKE $4 OR employee_number ILIKE $5 OR department ILIKE $6) ORDER BY last_name,first_name LIMIT $7`, q, like, like, like, like, like, limit)
 	if e != nil {
 		writeError(w, 500, "database_error", "Could not load employees")
 		return
@@ -446,16 +453,18 @@ func (s *Server) updateEmployee(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	var in struct {
-		Number     string `json:"employeeNumber"`
-		First      string `json:"firstName"`
-		Last       string `json:"lastName"`
-		Email      string `json:"email"`
-		Department string `json:"department"`
-		Title      string `json:"jobTitle"`
-		Location   string `json:"location"`
-		Type       string `json:"employmentType"`
-		Status     string `json:"status"`
-		StartDate  string `json:"startDate"`
+		Salary     *salaryInput `json:"salary"`
+		Bank       *bankInput   `json:"bank"`
+		Number     string       `json:"employeeNumber"`
+		First      string       `json:"firstName"`
+		Last       string       `json:"lastName"`
+		Email      string       `json:"email"`
+		Department string       `json:"department"`
+		Title      string       `json:"jobTitle"`
+		Location   string       `json:"location"`
+		Type       string       `json:"employmentType"`
+		Status     string       `json:"status"`
+		StartDate  string       `json:"startDate"`
 		//SalaryMinor  int64          `json:"salaryMinor"`
 		CustomFields map[string]any `json:"customFields"`
 		PhotoData    string         `json:"photoData"`
@@ -498,6 +507,12 @@ func (s *Server) updateEmployee(w http.ResponseWriter, r *http.Request) {
 	if in.Number == "" {
 		writeError(w, 400, "validation_error", "Employee number is required")
 		return
+	}
+	if in.Salary != nil || in.Bank != nil {
+		if !s.hrAccountsRole(r.Context(), u.Role) {
+			writeError(w, 403, "forbidden", "HR or Accounts permission is required for salary and bank changes")
+			return
+		}
 	}
 	custom, _ := json.Marshal(in.CustomFields)
 	tx, err := s.Store.DB.Begin(r.Context())
@@ -554,9 +569,19 @@ func (s *Server) updateEmployee(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if err = saveEmployeeFinancials(r.Context(), tx, id, u.ID, in.Salary, in.Bank); err != nil {
+		writeError(w, 400, "employee_financial_validation", err.Error())
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, 500, "database_error", "Could not commit employee update")
 		return
+	}
+	if in.Salary != nil {
+		s.Store.Audit(r.Context(), u.ID, "employee.salary_updated", "employee", id, "Updated salary with employee record", requestID(r))
+	}
+	if in.Bank != nil {
+		s.Store.Audit(r.Context(), u.ID, "employee.bank_updated", "employee", id, "Updated bank details with employee record", requestID(r))
 	}
 	s.Store.Audit(r.Context(), u.ID, "employee.updated", "employee", id, fmt.Sprintf("Updated employee %s %s", in.First, in.Last), requestID(r))
 	writeJSON(w, 200, map[string]any{"id": id, "message": "Employee updated"})
@@ -814,6 +839,7 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request) {
 }
 
 type Shift struct {
+	ShiftType    string `json:"shiftType"`
 	ID           string `json:"id"`
 	Name         string `json:"name"`
 	StartTime    string `json:"startTime"`
@@ -825,7 +851,7 @@ type Shift struct {
 }
 
 func (s *Server) shifts(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.Store.DB.Query(s.Store.Ctx, `SELECT id,name,start_time,end_time,break_minutes,grace_minutes,work_days,active FROM shifts ORDER BY active DESC,name`)
+	rows, err := s.Store.DB.Query(s.Store.Ctx, `SELECT id,name,start_time,end_time,break_minutes,grace_minutes,work_days,active,shift_type FROM shifts ORDER BY active DESC,name`)
 	if err != nil {
 		writeError(w, 500, "database_error", "Could not load shifts")
 		return
@@ -835,7 +861,7 @@ func (s *Server) shifts(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var x Shift
 		var active bool
-		if err := rows.Scan(&x.ID, &x.Name, &x.StartTime, &x.EndTime, &x.BreakMinutes, &x.GraceMinutes, &x.WorkDays, &active); err != nil {
+		if err := rows.Scan(&x.ID, &x.Name, &x.StartTime, &x.EndTime, &x.BreakMinutes, &x.GraceMinutes, &x.WorkDays, &active, &x.ShiftType); err != nil {
 			writeError(w, 500, "database_error", "Could not read shifts")
 			return
 		}
@@ -851,6 +877,7 @@ func (s *Server) createShift(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
+		ShiftType    string `json:"shiftType"`
 		Name         string `json:"name"`
 		StartTime    string `json:"startTime"`
 		EndTime      string `json:"endTime"`
@@ -862,11 +889,18 @@ func (s *Server) createShift(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "validation_error", "Enter a shift name, valid start/end times, and valid break/grace minutes")
 		return
 	}
+	if in.ShiftType == "" {
+		in.ShiftType = "NT"
+	}
+	if in.ShiftType != "NT" && in.ShiftType != "OT" {
+		writeError(w, 400, "invalid_shift_type", "Choose Regular or Overtime")
+		return
+	}
 	if strings.TrimSpace(in.WorkDays) == "" {
 		in.WorkDays = "Mon,Tue,Wed,Thu,Fri"
 	}
 	id, now := auth.NewID(), time.Now().UTC()
-	_, err := s.Store.DB.Exec(s.Store.Ctx, `INSERT INTO shifts(id,name,start_time,end_time,break_minutes,grace_minutes,work_days,active,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,true,$8,$9)`, id, strings.TrimSpace(in.Name), parseShiftClock(in.StartTime), parseShiftClock(in.EndTime), in.BreakMinutes, in.GraceMinutes, in.WorkDays, now, now)
+	_, err := s.Store.DB.Exec(s.Store.Ctx, `INSERT INTO shifts(id,name,start_time,end_time,break_minutes,grace_minutes,work_days,active,created_at,updated_at,shift_type) VALUES($1,$2,$3,$4,$5,$6,$7,true,$8,$9,$10)`, id, strings.TrimSpace(in.Name), parseShiftClock(in.StartTime), parseShiftClock(in.EndTime), in.BreakMinutes, in.GraceMinutes, in.WorkDays, now, now, in.ShiftType)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			writeError(w, 409, "conflict", "A shift with this name already exists")
@@ -903,48 +937,23 @@ func (s *Server) shiftAssignments(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"items": items})
 }
 func (s *Server) createShiftAssignment(w http.ResponseWriter, r *http.Request) {
-	u := current(r)
-	if !s.hasPermission(r.Context(), u.Role, "shift.assign") {
-		writeError(w, 403, "forbidden", "Shift assignment permission required")
-		return
-	}
 	var in struct {
 		ShiftID    string `json:"shiftId"`
 		EmployeeID string `json:"employeeId"`
 		Date       string `json:"date"`
 		Note       string `json:"note"`
 	}
-	if decode(r, &in) != nil || in.ShiftID == "" || in.EmployeeID == "" {
-		writeError(w, 400, "validation_error", "Select a shift, employee and date")
+	if decode(r, &in) != nil {
+		writeError(w, 400, "invalid_request", "Invalid assignment")
 		return
 	}
-	shiftDate, dateErr := time.Parse("2006-01-02", in.Date)
-	if dateErr != nil {
-		writeError(w, 400, "validation_error", "Date must use YYYY-MM-DD")
-		return
-	}
-	var active int
-	if err := s.Store.DB.QueryRow(s.Store.Ctx, `SELECT COUNT(*) FROM shifts WHERE id=$1 AND active=true`, in.ShiftID).Scan(&active); err != nil || active == 0 {
-		writeError(w, 400, "invalid_shift", "Select an active shift")
-		return
-	}
-	var emp int
-	if err := s.Store.DB.QueryRow(s.Store.Ctx, `SELECT COUNT(*) FROM employees WHERE id=$1 AND status='Active'`, in.EmployeeID).Scan(&emp); err != nil || emp == 0 {
-		writeError(w, 400, "invalid_employee", "Select an active employee")
-		return
-	}
-	id, now := auth.NewID(), time.Now().UTC()
-	_, err := s.Store.DB.Exec(s.Store.Ctx, `INSERT INTO shift_assignments(id,shift_id,employee_id,shift_date,status,note,created_by,created_at) VALUES($1,$2,$3,$4,'Assigned',$5,$6,$7)`, id, in.ShiftID, in.EmployeeID, shiftDate, strings.TrimSpace(in.Note), u.ID, now)
+	id, err := s.assignShift(r.Context(), current(r), in.ShiftID, in.EmployeeID, in.Date, in.Note)
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "unique") {
-			writeError(w, 409, "assignment_conflict", "This employee already has a shift assigned for that date")
-		} else {
-			writeError(w, 500, "database_error", "Could not assign shift")
-		}
+		writeError(w, 409, "assignment_conflict", err.Error())
 		return
 	}
-	s.Store.Audit(r.Context(), u.ID, "shift.assigned", "shift_assignment", id, "Assigned shift on "+in.Date, requestID(r))
-	writeJSON(w, 201, map[string]any{"id": id, "message": "Shift assigned"})
+	s.Store.Audit(r.Context(), current(r).ID, "shift.assigned", "shift_assignment", id, "Assigned shift on "+in.Date, requestID(r))
+	writeJSON(w, 201, map[string]any{"id": id})
 }
 func (s *Server) deleteShiftAssignment(w http.ResponseWriter, r *http.Request) {
 	u := current(r)
@@ -1013,8 +1022,21 @@ func (s *Server) punch(w http.ResponseWriter, r *http.Request, typ string) {
 		return
 	}
 	now := time.Now().UTC()
+	shiftType := "NT"
+	if typ == "check_in" {
+		err := s.Store.DB.QueryRow(r.Context(), `SELECT sh.shift_type FROM shift_assignments a JOIN shifts sh ON sh.id=a.shift_id WHERE a.employee_id=$1 AND a.status='Assigned' AND $2::timestamp >= a.shift_date+sh.start_time AND $2::timestamp < a.shift_date+sh.end_time+CASE WHEN sh.end_time<=sh.start_time THEN interval '1 day' ELSE interval '0 day' END ORDER BY a.shift_date DESC LIMIT 1`, u.EmployeeID, now.In(time.Local).Format("2006-01-02 15:04:05")).Scan(&shiftType)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, 500, "database_error", "Could not resolve scheduled shift")
+			return
+		}
+	} else {
+		if err := s.Store.DB.QueryRow(r.Context(), `SELECT shift_type FROM attendance_events WHERE employee_id=$1 ORDER BY occurred_at DESC LIMIT 1`, u.EmployeeID).Scan(&shiftType); err != nil {
+			writeError(w, 500, "database_error", "Could not resolve punch shift")
+			return
+		}
+	}
 	id := auth.NewID()
-	_, e = s.Store.DB.Exec(s.Store.Ctx, `INSERT INTO attendance_events(id,employee_id,event_type,occurred_at,source) VALUES($1,$2,$3,$4,$5)`, id, u.EmployeeID, typ, now, "web")
+	_, e = s.Store.DB.Exec(s.Store.Ctx, `INSERT INTO attendance_events(id,employee_id,event_type,occurred_at,source,shift_type) VALUES($1,$2,$3,$4,$5,$6)`, id, u.EmployeeID, typ, now, "web", shiftType)
 	if e != nil {
 		writeError(w, 500, "database_error", "Could not record attendance")
 		return
@@ -1077,7 +1099,7 @@ func (s *Server) createLeave(w http.ResponseWriter, r *http.Request) {
 		Days       float64 `json:"days"`
 		Reason     string  `json:"reason"`
 	}
-	if decode(r, &in) != nil || in.Type == "" || in.Days <= 0 || in.Days > 365 || len(in.Reason) > 1000 {
+	if decode(r, &in) != nil || in.Type == "" || len(in.Reason) > 1000 {
 		writeError(w, 400, "validation_error", "Enter a leave type, valid dates, days and reason")
 		return
 	}
@@ -1116,6 +1138,11 @@ func (s *Server) createLeave(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "validation_error", "Selected employee was not found")
 		return
 	}
+	in.Days, e1 = s.workingLeaveDays(r.Context(), start, end)
+	if e1 != nil || in.Days <= 0 {
+		writeError(w, 400, "invalid_duration", "Select a date range containing working days, up to 366 calendar days")
+		return
+	}
 	id := auth.NewID()
 	now := time.Now().UTC()
 	_, e := s.Store.DB.Exec(r.Context(), `INSERT INTO leave_requests(id,employee_id,leave_type,start_date,end_date,days,reason,status,submitted_at) VALUES($1,$2,$3,$4,$5,$6,$7,'Pending',$8)`, id, targetEmployeeID, in.Type, start, end, in.Days, strings.TrimSpace(in.Reason), now)
@@ -1127,47 +1154,20 @@ func (s *Server) createLeave(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 201, map[string]any{"id": id, "status": "Pending"})
 }
 func (s *Server) leaveDecision(w http.ResponseWriter, r *http.Request) {
-	u := current(r)
-	if !s.hasPermission(r.Context(), u.Role, "leave.review") {
-		writeError(w, 403, "forbidden", "You cannot approve leave requests")
-		return
-	}
-	id := r.PathValue("id")
 	var in struct {
 		Decision string `json:"decision"`
 		Note     string `json:"note"`
 	}
-	if decode(r, &in) != nil || (in.Decision != "Approved" && in.Decision != "Rejected") || len(in.Note) > 1000 {
-		writeError(w, 400, "validation_error", "Decision must be Approved or Rejected")
+	if decode(r, &in) != nil {
+		writeError(w, 400, "invalid_request", "Invalid decision")
 		return
 	}
-	var emp, status string
-	e := s.Store.DB.QueryRow(s.Store.Ctx, `SELECT employee_id,status FROM leave_requests WHERE id=$1`, id).Scan(&emp, &status)
-	if e != nil {
-		writeError(w, 404, "not_found", "Leave request not found")
+	code, err := s.decideLeave(r.Context(), current(r), r.PathValue("id"), in.Decision, in.Note, requestID(r))
+	if err != nil {
+		writeError(w, code, "decision_failed", err.Error())
 		return
 	}
-	if status != "Pending" {
-		writeError(w, 409, "already_decided", "This request has already been decided")
-		return
-	}
-	if u.EmployeeID != "" && u.EmployeeID == emp {
-		writeError(w, 403, "self_approval", "You cannot approve your own request")
-		return
-	}
-	now := time.Now().UTC()
-	res, e := s.Store.DB.Exec(s.Store.Ctx, `UPDATE leave_requests SET status=$1,decided_at=$2,decided_by=$3,decision_note=$4 WHERE id=$5 AND status='Pending'`, in.Decision, now, u.ID, strings.TrimSpace(in.Note), id)
-	if e != nil {
-		writeError(w, 500, "database_error", "Could not decide request")
-		return
-	}
-	n := res.RowsAffected()
-	if n != 1 {
-		writeError(w, 409, "already_decided", "This request has already been decided")
-		return
-	}
-	s.Store.Audit(r.Context(), u.ID, "leave."+strings.ToLower(in.Decision), "leave_request", id, "Leave request decision: "+in.Decision, requestID(r))
-	writeJSON(w, 200, map[string]any{"id": id, "status": in.Decision})
+	writeJSON(w, 200, map[string]any{"id": r.PathValue("id"), "status": in.Decision})
 }
 func (s *Server) payroll(w http.ResponseWriter, r *http.Request) {
 	u := current(r)

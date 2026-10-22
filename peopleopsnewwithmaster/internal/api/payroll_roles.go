@@ -453,7 +453,7 @@ func (s *Server) recalculateActualHours(employeeID string, day time.Time) {
 		return
 	}
 	var assigned int
-	err = s.Store.DB.QueryRow(ctx, `SELECT GREATEST(0,CASE WHEN s.end_time>=s.start_time THEN EXTRACT(EPOCH FROM (s.end_time-s.start_time))/60 ELSE EXTRACT(EPOCH FROM (s.end_time-s.start_time+interval '24 hours'))/60 END-s.break_minutes)::int FROM shift_assignments a JOIN shifts s ON s.id=a.shift_id WHERE a.employee_id=$1 AND a.shift_date=$2 AND a.status='Assigned'`, employeeID, day.Format("2006-01-02")).Scan(&assigned)
+	err = s.Store.DB.QueryRow(ctx, `SELECT COALESCE(SUM(GREATEST(0,CASE WHEN s.end_time>=s.start_time THEN EXTRACT(EPOCH FROM (s.end_time-s.start_time))/60 ELSE EXTRACT(EPOCH FROM (s.end_time-s.start_time+interval '24 hours'))/60 END-s.break_minutes)),0)::int FROM shift_assignments a JOIN shifts s ON s.id=a.shift_id WHERE a.employee_id=$1 AND a.shift_date=$2 AND a.status='Assigned' AND s.shift_type='NT'`, employeeID, day.Format("2006-01-02")).Scan(&assigned)
 	if err != nil {
 		if !strings.Contains(strings.ToLower(err.Error()), "no rows") {
 			log.Println("actual hours: assigned shift lookup failed:", err)
